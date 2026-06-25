@@ -1,0 +1,11 @@
+# Never commit any Messages/AddressBook data
+*.db
+*.db-wal
+*.db-shm
+chat.db*
+AddressBook*
+
+# Python / macOS cruft
+__pycache__/
+*.pyc
+.DS_Store
