@@ -464,11 +464,17 @@ def find_chats(con, identifier, contacts):
         if q == guid or q == ci:
             matches.append(cid)
             continue
-        # phone suffix match (last 8 digits) against identifier or participants
+        # phone suffix match (last 8 digits). ONLY against phone-like handles:
+        # an email (lsyong7@…) would contribute a stray digit ("7") and, via the
+        # reverse endswith, falsely match any number ending in 7. Restrict to
+        # non-"@" handles and require >=7 digits so short fragments can't match.
         if qd and len(qd) >= 7:
             suf = qd[-8:]
-            hay = [digits(ci)] + [digits(p) for p in plist]
-            if any(h and (h.endswith(suf) or suf.endswith(h[-8:] if len(h) >= 8 else h)) for h in hay):
+            phones = ([ci] if ci and "@" not in ci else []) \
+                + [p for p in plist if "@" not in p]
+            hay = [digits(p) for p in phones]
+            if any(h and len(h) >= 7 and (h.endswith(suf) or suf.endswith(h[-8:]))
+                   for h in hay):
                 matches.append(cid)
                 continue
         # contact-name match: any participant handle belongs to that contact
@@ -897,10 +903,14 @@ def resolve_send_target(con, identifier, contacts, force_service):
         if idy not in identities:
             identities.append(idy)
     if len(identities) > 1:
-        # genuinely different people — surface one handle per identity
+        # genuinely different people — surface one handle per identity, picking
+        # each person's most-active handle (iMessage, then most recent) so a
+        # one-off stray thread (e.g. a mis-canonicalized +86) never represents them.
         reps = []
         for idy in identities:
-            reps.append(next(h for h, _s, _d, i in cands if i == idy))
+            best_h = max((c for c in cands if c[3] == idy),
+                         key=lambda c: (1 if c[1] == "iMessage" else 0, c[2]))
+            reps.append(best_h[0])
         return {"ambiguous": reps}
 
     # one person: prefer an iMessage thread, then the most recent.
