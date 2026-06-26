@@ -20,8 +20,9 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
     send "<text>" to buddy "<handle>" of svc
   end tell
   ```
-  - **iMessage 자기 전송 테스트 → `is_sent=1` 도착 확인.** 우려했던 `send to buddy` 깨짐 **없음**.
-  - **SMS 전송 → 메시지 생성됨**(self-SMS는 단말이 확인 안 해 `is_sent=0`이지만, 타 번호 SMS는 `is_sent=1` 확인 — 릴레이 정상).
+  - **iMessage 자기 전송 → `is_sent=1` 도착 확인.** 우려했던 `send to buddy` 깨짐 **없음**.
+  - **SMS 타 번호 전송 → `is_sent=1, error=0` 확인** (이모지 포함 정상). 릴레이 OK.
+    단 **자기 번호로 SMS는 단말이 못 보내 `is_sent=0`(Not Delivered)** — 무의미 케이스.
 - **서비스 탐색**: `services`를 돌며 `service type`(iMessage/SMS/RCS)으로 식별.
   일부 레거시/비활성 서비스는 `service type` 접근 시 `-10000` → `try`로 스킵.
   대상 핸들이 iMessage 등록이면 iMessage 서비스, 아니면 SMS 서비스 선택(스레드 기존 service도 참고).
