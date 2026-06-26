@@ -25,6 +25,7 @@ macOS **메시지(Messages)** 앱의 로컬 DB(`~/Library/Messages/chat.db`)를 
 msg threads [--limit N] [--json]            # 최근 대화 스레드 목록 (기본 20)
 msg read <identifier> [--limit N] [--json]  # 특정 스레드 메시지, 시간순 (기본 40)
 msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (기본=메인 받은편지함 파란 점)
+msg search <query> [--from ID] [--since YYYY-MM-DD] [--until ...] [--limit N] [--json]
 msg send <identifier> <text…> [--force] [--dry-run] [--sms|--imessage]
 msg reply <identifier> <text…> [...]         # send의 별칭
 msg complete [prefix]                        # 자동완성 후보(이름/업체명) 출력 — 셸 completion용
@@ -61,7 +62,9 @@ msg complete [prefix]                        # 자동완성 후보(이름/업체
 - 특정인과의 최근 대화 요약: `msg read "<상대>" -n 60 --json` 후 분석.
 - "최근 뭐 왔어"류: `msg threads -n 15` (사람용) 또는 `--json`.
 - 인증번호/택배/예약 문자 찾기: 상대를 알면 `msg read <번호> --json`, 모르면
-  `msg threads -n 40 --json`로 스니펫 훑고 후보 스레드를 `read`로 파고든다.
+  **`msg search <키워드> --json`**(전체 본문 검색)이 가장 빠르다. 특정인이면 `--from <상대>`.
+- "그거 언제 뭐라 했더라" → `msg search "<키워드>"` (날짜 범위는 `--since/--until`).
+  결과의 `text`로 전체 문맥, `--json`은 `{date,thread,from,handle,is_from_me,service,text}`.
 
 ## 보내기 (send / reply) — ⚠️ 외부로 나가는 동작
 ```

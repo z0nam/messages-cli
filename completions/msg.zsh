@@ -9,7 +9,7 @@
 
 _msg_cli() {
   if (( CURRENT == 2 )); then
-    compadd threads read unread send reply complete
+    compadd threads read unread search send reply complete
     return
   fi
   # complete the recipient/identifier (the word right after read/send/reply)

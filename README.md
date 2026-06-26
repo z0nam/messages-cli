@@ -33,6 +33,7 @@ source ~/dev/messages-cli/completions/msg.zsh
 msg threads [--limit N] [--json]            # 최근 대화 스레드 목록 (기본 20)
 msg read <identifier> [--limit N] [--json]  # 특정 스레드 메시지 (기본 40)
 msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (Messages 메인 파란 점; --all=필터 폴더까지)
+msg search <query> [--from ID] [--since D] [--until D] [-n N] [--json]   # 전체 본문 검색
 msg send <identifier> <text…>               # 보내기 (미리보기+확인; --force/--dry-run/--sms/--imessage)
 msg reply <identifier> <text…>              # send의 별칭
 msg complete [prefix]                        # 자동완성 후보 출력 (셸 completion용)
@@ -107,6 +108,10 @@ Security > Automation > 터미널 → Messages).
   `(SMS)`/`(RCS)` 라벨. 그룹은 `chat_handle_join`→`handle.id`로 참여자 매핑.
 - **첨부**: `cache_has_attachments` 또는 본문에 U+FFFC(object-replacement)가 있으면 `[첨부]` 표시.
   파일 경로 해석은 stretch(미구현).
+- **검색(`search`)**: 본문 99.9%가 attributedBody(바이너리)라 SQL로 직접 못 본다. 트릭 —
+  텍스트는 blob 안에 **UTF-8 바이트 그대로** 들어 있으므로 `instr(attributedBody, <질의 bytes>)`로
+  1차 필터(전 행 디코드 없이)한 뒤, 후보만 디코드해 `질의 in 본문`으로 확정(attribute 이름 등
+  오탐 제거). 24만 행에서 ~0.5s. `--from/--since/--until`로 좁힘.
 - **보내기**: `osascript`로 Messages.app 구동 — `send "<text>" to buddy "<handle>" of <service>`.
   핸들·본문은 argv로 넘겨 이스케이프 문제 회피. 서비스는 런타임에 `service type`으로 탐색.
   전송은 chat.db에 직접 안 쓰고, 전송 후 `is_sent`/`error`를 다시 읽어 결과 확인.

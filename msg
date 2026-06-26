@@ -103,6 +103,24 @@ def fmt_dt(dt):
     return dt.strftime("%Y-%m-%d %H:%M") if dt else "????-??-?? ??:??"
 
 
+def parse_user_date(s, end=False):
+    """'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' -> Cocoa ns. None on failure.
+
+    With end=True a date-only value snaps to the end of that day (inclusive).
+    """
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        unix = dt.timestamp()
+        if end and ":" not in s:
+            unix += 86400 - 1  # include the whole day
+        return int((unix - COCOA_EPOCH) * 1_000_000_000)
+    return None
+
+
 def decode_attributed_body(blob):
     """Extract the message string from an NSAttributedString typedstream blob.
 
@@ -631,6 +649,101 @@ def cmd_unread(con, args, contacts):
 
 
 # --------------------------------------------------------------------------
+# search (full-text across all message bodies)
+# --------------------------------------------------------------------------
+def _snippet_around(body, q, width=70):
+    """Snippet centered on the match, with «» around it and … at the edges."""
+    flat = body.replace("\n", " ⏎ ")
+    i = flat.lower().find(q.lower())
+    if i < 0:
+        return (flat[:width] + ("…" if len(flat) > width else ""))
+    lead = 28
+    start = max(0, i - lead)
+    end = min(len(flat), i + len(q) + (width - lead))
+    seg = flat[start:i] + "«" + flat[i:i + len(q)] + "»" + flat[i + len(q):end]
+    return ("…" if start > 0 else "") + seg + ("…" if end < len(flat) else "")
+
+
+def cmd_search(con, args, contacts):
+    q = args.query.strip()
+    if not q:
+        _die("검색어가 비어 있습니다.")
+
+    where = ["(m.text LIKE ? OR instr(m.attributedBody, ?) > 0)"]
+    params = [f"%{q}%", q.encode("utf-8")]
+
+    if args.from_:
+        chat_ids, _ = find_chats(con, args.from_, contacts)
+        if not chat_ids:
+            _die(f"'{args.from_}' 대화를 찾지 못했습니다.")
+        where.append(f"cmj.chat_id IN ({','.join('?' * len(chat_ids))})")
+        params += chat_ids
+    if args.since:
+        ns = parse_user_date(args.since)
+        if ns is None:
+            _die(f"--since 날짜 형식 오류: {args.since} (예: 2026-06-01)")
+        where.append("m.date >= ?")
+        params.append(ns)
+    if args.until:
+        ns = parse_user_date(args.until, end=True)
+        if ns is None:
+            _die(f"--until 날짜 형식 오류: {args.until} (예: 2026-06-30)")
+        where.append("m.date <= ?")
+        params.append(ns)
+
+    sql = (
+        "SELECT m.date AS date, m.is_from_me AS me, m.text AS text, "
+        "m.attributedBody AS ab, m.service AS service, h.id AS handle, "
+        "c.display_name AS dn, c.chat_identifier AS ci "
+        "FROM message m "
+        "JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
+        "JOIN chat c ON c.ROWID = cmj.chat_id "
+        "LEFT JOIN handle h ON h.ROWID = m.handle_id "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY m.date DESC LIMIT ?"
+    )
+    params.append(args.scan)  # cap rows scanned/decoded
+
+    ql = q.lower()
+    out = []
+    for r in con.execute(sql, params):
+        body = message_text(r["text"], r["ab"])
+        if ql not in body.lower():
+            continue  # instr() blob hit was a false positive (attribute name etc.)
+        handle = r["handle"] or ""
+        thread = r["dn"] or contacts.display(handle or r["ci"] or "")
+        out.append({
+            "date": fmt_dt(cocoa_to_local(r["date"])),
+            "thread": thread,
+            "from": "나" if r["me"] else (contacts.display(handle) or "상대"),
+            "handle": "" if r["me"] else handle,
+            "is_from_me": bool(r["me"]),
+            "service": r["service"] or "",
+            "text": body,
+            "snippet": _snippet_around(body, q),
+        })
+        if len(out) >= args.limit:
+            break
+
+    if args.json:
+        for o in out:
+            o.pop("snippet", None)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+
+    if not out:
+        print(f"'{q}' 검색 결과 없음.")
+        return
+    print(f"'{q}' — {len(out)}건"
+          + (f" (최대 {args.limit})" if len(out) >= args.limit else "") + "\n")
+    for o in out:
+        svc = o["service"]
+        tag = f" ({svc})" if svc and svc != "iMessage" else ""
+        who = f"나→{o['thread']}" if o["is_from_me"] else o["from"]
+        print(f"[{o['date']}] {who}{tag}: {o['snippet']}")
+
+
+# --------------------------------------------------------------------------
 # send / reply (OUTWARD — drives Messages.app via osascript)
 #
 # This is the only place the tool reaches outside read-only territory. It never
@@ -887,6 +1000,17 @@ def main():
     pr.add_argument("--limit", "-n", type=int, default=40)
     pr.add_argument("--json", action="store_true")
 
+    psr = sub.add_parser("search", help="전체 메시지 본문 검색")
+    psr.add_argument("query", help="검색어")
+    psr.add_argument("--from", dest="from_", metavar="ID",
+                     help="특정 상대/스레드로 제한 (이름/번호/이메일)")
+    psr.add_argument("--since", help="이 날짜 이후 (YYYY-MM-DD)")
+    psr.add_argument("--until", help="이 날짜 이전 (YYYY-MM-DD)")
+    psr.add_argument("--limit", "-n", type=int, default=30, help="결과 개수 (기본 30)")
+    psr.add_argument("--scan", type=int, default=4000,
+                     help="디코드 후보 상한 (기본 4000)")
+    psr.add_argument("--json", action="store_true")
+
     pu = sub.add_parser("unread", help="안 읽은 메시지만 (Messages 파란 점)")
     pu.add_argument("--limit", "-n", type=int, default=100)
     pu.add_argument("--all", "-a", action="store_true",
@@ -920,6 +1044,8 @@ def main():
             cmd_read(con, args, contacts)
         elif args.cmd == "unread":
             cmd_unread(con, args, contacts)
+        elif args.cmd == "search":
+            cmd_search(con, args, contacts)
         elif args.cmd in ("send", "reply"):
             cmd_send(con, args, contacts)
     finally:
