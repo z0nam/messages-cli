@@ -23,7 +23,7 @@ macOS **메시지(Messages)** 앱의 로컬 DB(`~/Library/Messages/chat.db`)를 
 ## 명령
 ```
 msg threads [--limit N] [--json]            # 최근 대화 스레드 목록 (기본 20)
-msg read <identifier> [--limit N] [--json]  # 특정 스레드 메시지, 시간순 (기본 40)
+msg read <identifier> [--limit N] [--media] [--open] [--json]  # 스레드 메시지 (시간순)
 msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (기본=메인 받은편지함 파란 점)
 msg search <query> [--from ID] [--since YYYY-MM-DD] [--until ...] [--limit N] [--json]
 msg send <identifier> <text…> [--force] [--dry-run] [--sms|--imessage]
@@ -85,7 +85,9 @@ msg reply <상대> <보낼 내용…>     # send의 별칭
 ## 출력 읽는 법
 - 발신자: `is_from_me`면 `"나"`, 아니면 상대 핸들(번호/이메일).
 - `service`가 `iMessage`가 아니면 `(SMS)`·`(RCS)` 라벨이 붙는다(JSON은 `service` 필드).
-- `has_attachment`/`[첨부]`: 첨부가 있다는 표시만. **파일 경로 해석은 미구현**(stretch).
+- **첨부**: `read`는 첨부의 **실제 파일 경로**(`~/Library/Messages/Attachments/...`)·원본명·mime·크기를
+  해석해 보여준다. JSON엔 `attachments: [{path,name,mime,uti,bytes,exists}]`. `exists=false`면
+  아직 다운로드 안 된 것. `--media`로 첨부 있는 메시지만, `--open`으로 파일을 macOS `open`으로 연다.
 - 시각은 localtime, `YYYY-MM-DD HH:MM`.
 
 ## 주의 / 함정

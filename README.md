@@ -31,7 +31,7 @@ source ~/dev/messages-cli/completions/msg.zsh
 ## 사용
 ```
 msg threads [--limit N] [--json]            # 최근 대화 스레드 목록 (기본 20)
-msg read <identifier> [--limit N] [--json]  # 특정 스레드 메시지 (기본 40)
+msg read <identifier> [--limit N] [--media] [--open] [--json]  # 스레드 메시지 (첨부 경로 해석)
 msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (Messages 메인 파란 점; --all=필터 폴더까지)
 msg search <query> [--from ID] [--since D] [--until D] [-n N] [--json]   # 전체 본문 검색
 msg send <identifier> <text…>               # 보내기 (미리보기+확인; --force/--dry-run/--sms/--imessage)
@@ -106,8 +106,10 @@ Security > Automation > 터미널 → Messages).
   돌아가 글자가 겹쳐 깨진다(특히 `[Web발신]` CRLF 문자).
 - **발신자/서비스**: `is_from_me`→"나", 아니면 `handle.id`. `service`가 iMessage가 아니면
   `(SMS)`/`(RCS)` 라벨. 그룹은 `chat_handle_join`→`handle.id`로 참여자 매핑.
-- **첨부**: `cache_has_attachments` 또는 본문에 U+FFFC(object-replacement)가 있으면 `[첨부]` 표시.
-  파일 경로 해석은 stretch(미구현).
+- **첨부**: `cache_has_attachments` 또는 본문에 U+FFFC가 있으면 첨부로 본다. `read`는
+  `attachment`/`message_attachment_join`을 조인해 **실제 파일 경로**(`~/Library/Messages/Attachments/...`,
+  expanduser)·원본명·mime·크기를 해석. 디스크에 없으면(미다운로드) `(파일 없음)` 표시.
+  `--media`(첨부만)·`--open`(macOS `open`으로 열기). JSON엔 `attachments[]`.
 - **검색(`search`)**: 본문 99.9%가 attributedBody(바이너리)라 SQL로 직접 못 본다. 트릭 —
   텍스트는 blob 안에 **UTF-8 바이트 그대로** 들어 있으므로 `instr(attributedBody, <질의 bytes>)`로
   1차 필터(전 행 디코드 없이)한 뒤, 후보만 디코드해 `질의 in 본문`으로 확정(attribute 이름 등

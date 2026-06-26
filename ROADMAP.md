@@ -79,7 +79,7 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
 - ~~`msg search <query> [--from] [--since] [--until]` — 전체 본문 검색~~ **완료 ✅**
   (instr blob 바이트 1차필터 → 디코드 확정, ~0.5s).
 - `msg read` 필터: `--since/--until/--from`, `--media`(첨부만), `--limit` 페이징.
-- **첨부 경로 해석**: `attachment`/`message_attachment_join` → 실제 파일 경로 출력/열기(`--open`). (현재 `[첨부]` 표시만)
+- ~~**첨부 경로 해석**: `attachment`/`message_attachment_join` → 실제 파일 경로·이름·mime·크기, `--media`/`--open`~~ **완료 ✅** (read에 통합).
 - `msg export <id> [--format txt|json|html]` — 대화 내보내기.
 - `msg watch [<id>]` — 새 메시지 실시간 tail(폴링).
 - 리액션/탭백(associated_message_type) 표시.

@@ -487,6 +487,38 @@ def find_chats(con, identifier, contacts):
     return matches, parts
 
 
+def _human_size(n):
+    if not n:
+        return ""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return (f"{int(n)} {unit}" if unit == "B" else f"{n:.0f} {unit}")
+        n /= 1024.0
+
+
+def attachments_for(con, rowids):
+    """message ROWID -> [ {path, name, mime, uti, bytes, exists} ]."""
+    if not rowids:
+        return {}
+    ph = ",".join("?" * len(rowids))
+    res = {}
+    for mid, fn, tn, mime, uti, tb in con.execute(
+        f"""SELECT maj.message_id, a.filename, a.transfer_name, a.mime_type,
+                   a.uti, a.total_bytes
+            FROM message_attachment_join maj
+            JOIN attachment a ON a.ROWID = maj.attachment_id
+            WHERE maj.message_id IN ({ph})""", rowids):
+        path = os.path.expanduser(fn) if fn else None
+        res.setdefault(mid, []).append({
+            "path": path,
+            "name": tn or (os.path.basename(path) if path else None),
+            "mime": mime, "uti": uti, "bytes": tb,
+            "exists": bool(path and os.path.exists(path)),
+        })
+    return res
+
+
 def cmd_read(con, args, contacts):
     chat_ids, parts = find_chats(con, args.identifier, contacts)
     if not chat_ids:
@@ -494,22 +526,25 @@ def cmd_read(con, args, contacts):
              f"`msg threads`로 식별자를 확인하세요.")
 
     placeholders = ",".join("?" * len(chat_ids))
+    media_clause = "AND m.cache_has_attachments = 1" if args.media else ""
     rows = con.execute(
         f"""
-        SELECT m.date AS date, m.is_from_me AS is_from_me,
+        SELECT m.ROWID AS rid, m.date AS date, m.is_from_me AS is_from_me,
                m.text AS text, m.attributedBody AS ab,
                m.cache_has_attachments AS has_att,
                m.service AS service, h.id AS handle
         FROM message m
         JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
         LEFT JOIN handle h ON h.ROWID = m.handle_id
-        WHERE cmj.chat_id IN ({placeholders})
+        WHERE cmj.chat_id IN ({placeholders}) {media_clause}
         ORDER BY m.date DESC
         LIMIT ?
         """,
         (*chat_ids, args.limit),
     ).fetchall()
     rows = list(reversed(rows))  # chronological
+
+    atts = attachments_for(con, [r["rid"] for r in rows if r["has_att"]])
 
     out = []
     for r in rows:
@@ -524,7 +559,17 @@ def cmd_read(con, args, contacts):
             "service": r["service"] or "",
             "text": txt,
             "has_attachment": bool(r["has_att"]) or inline_att,
+            "attachments": atts.get(r["rid"], []),
         })
+
+    if args.open:
+        paths = [a["path"] for o in out for a in o["attachments"] if a["exists"]]
+        if not paths:
+            print("열 수 있는 첨부 파일이 없습니다 (다운로드 안 됐거나 없음).")
+        else:
+            subprocess.run(["open", *paths])
+            print(f"첨부 {len(paths)}개를 열었습니다.")
+        return
 
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -535,9 +580,14 @@ def cmd_read(con, args, contacts):
         if o["service"] and o["service"] != "iMessage":
             tag = f" ({o['service']})"
         body = o["text"]
-        if o["has_attachment"]:
+        if o["has_attachment"] and not o["attachments"]:
             body = ("[첨부] " + body).strip()
         print(f"[{o['date']}] {o['from']}{tag}: {body}")
+        for a in o["attachments"]:
+            meta = ", ".join(x for x in (a["mime"], _human_size(a["bytes"])) if x)
+            tail = "" if a["exists"] else "  (파일 없음/미다운로드)"
+            print(f"        ↳ 첨부 {a['name']}" + (f" ({meta})" if meta else "")
+                  + (f"\n          {a['path']}{tail}" if a["path"] else ""))
 
 
 # --------------------------------------------------------------------------
@@ -998,6 +1048,8 @@ def main():
     pr = sub.add_parser("read", help="특정 스레드의 메시지")
     pr.add_argument("identifier", help="전화번호/이메일/이름/chat_identifier")
     pr.add_argument("--limit", "-n", type=int, default=40)
+    pr.add_argument("--media", action="store_true", help="첨부 있는 메시지만")
+    pr.add_argument("--open", action="store_true", help="첨부 파일을 macOS open으로 열기")
     pr.add_argument("--json", action="store_true")
 
     psr = sub.add_parser("search", help="전체 메시지 본문 검색")
