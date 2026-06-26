@@ -9,10 +9,11 @@
 
 _msg_cli() {
   if (( CURRENT == 2 )); then
-    compadd threads read unread complete
+    compadd threads read unread send reply complete
     return
   fi
-  if [[ ${words[2]} == read ]]; then
+  # complete the recipient/identifier (the word right after read/send/reply)
+  if (( CURRENT == 3 )) && [[ ${words[2]} == (read|send|reply) ]]; then
     local cur=${words[CURRENT]}
     # A mid-composition Korean syllable (밑줄 표시, 미확정) reaches zsh as an
     # EMPTY word. Without this guard we'd ask msg for an empty prefix and dump

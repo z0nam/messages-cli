@@ -15,8 +15,10 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 
 COCOA_EPOCH = 978307200  # seconds between 1970-01-01 and 2001-01-01 UTC
@@ -629,6 +631,223 @@ def cmd_unread(con, args, contacts):
 
 
 # --------------------------------------------------------------------------
+# send / reply (OUTWARD — drives Messages.app via osascript)
+#
+# This is the only place the tool reaches outside read-only territory. It never
+# writes chat.db; it asks Messages.app to send, then re-reads chat.db to confirm.
+# --------------------------------------------------------------------------
+_SEND_APPLESCRIPT = r'''on run argv
+  set theHandle to item 1 of argv
+  set theText to item 2 of argv
+  set theType to item 3 of argv
+  tell application "Messages"
+    set theService to missing value
+    repeat with s in services
+      try
+        if (service type of s as text) is theType then set theService to s
+      end try
+    end repeat
+    if theService is missing value then error "NO_SERVICE"
+    send theText to buddy theHandle of theService
+  end tell
+end run
+'''
+
+
+def send_via_messages(handle, text, service_type):
+    """Ask Messages.app to send. Returns (ok: bool, message: str).
+
+    handle/text/service_type are passed as argv (no escaping pitfalls).
+    """
+    try:
+        p = subprocess.run(
+            ["osascript", "-", handle, text, service_type],
+            input=_SEND_APPLESCRIPT, text=True,
+            capture_output=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return False, "osascript를 찾을 수 없습니다 (macOS 전용 기능입니다)."
+    except subprocess.TimeoutExpired:
+        return False, "전송 시간 초과 — Automation 권한 팝업이 떠 있는지 확인하세요."
+    if p.returncode == 0:
+        return True, "Messages에 전송 요청을 보냈습니다"
+    err = (p.stderr or "").strip()
+    low = err.lower()
+    if "-1743" in err or "not allow" in low or "not authoriz" in low:
+        return False, (
+            "Automation 권한이 필요합니다: System Settings > Privacy & Security >\n"
+            "Automation 에서 이 터미널 앱의 'Messages' 제어를 허용한 뒤 다시 시도하세요.")
+    if "NO_SERVICE" in err:
+        return False, (f"'{service_type}' 서비스를 찾을 수 없습니다. "
+                       "Messages에 해당 계정(iMessage/문자전달)이 설정돼 있는지 확인하세요.")
+    return False, f"전송 실패: {err}"
+
+
+def resolve_send_target(con, identifier, contacts, force_service):
+    """Figure out (handle, name, service) to send to. Returns a dict:
+      {handle, name, service, new}                  — ready to send
+      {ambiguous: [handles]}                          — too many people matched
+      {group: True}                                   — matched a group (unsupported)
+      None                                            — nothing matched
+    """
+    chat_ids, parts = find_chats(con, identifier, contacts)
+    if not chat_ids:
+        # brand-new target typed directly as a phone/email?
+        q = identifier.strip()
+        if "@" in q or len(digits(q)) >= 7:
+            stype = force_service or "iMessage"
+            return {"handle": q, "name": contacts.display(q),
+                    "service": stype, "new": True}
+        return None
+
+    ph = ",".join("?" * len(chat_ids))
+    det = {r["rid"]: r for r in con.execute(
+        f"SELECT ROWID AS rid, chat_identifier AS ci, service_name AS svc "
+        f"FROM chat WHERE ROWID IN ({ph})", chat_ids)}
+    last = {}
+    for cid, md in con.execute(
+        f"SELECT cmj.chat_id, MAX(m.date) FROM chat_message_join cmj "
+        f"JOIN message m ON m.ROWID = cmj.message_id "
+        f"WHERE cmj.chat_id IN ({ph}) GROUP BY cmj.chat_id", chat_ids):
+        last[cid] = md or 0
+
+    # candidates: 1:1 chats only. identity collapses a person's many handles.
+    cands = []   # (handle, service, last_date, identity)
+    groups = []
+    for cid in chat_ids:
+        plist = parts.get(cid, [])
+        d = det.get(cid)
+        if len(plist) > 1:
+            groups.append(cid)
+            continue
+        h = plist[0] if plist else (d["ci"] if d else None)
+        if not h:
+            continue
+        identity = contacts.name_for(h) or h
+        cands.append((h, (d["svc"] if d else None), last.get(cid, 0), identity))
+
+    if not cands:
+        return {"group": True} if groups else None
+
+    identities = []
+    for _h, _s, _d, idy in cands:
+        if idy not in identities:
+            identities.append(idy)
+    if len(identities) > 1:
+        # genuinely different people — surface one handle per identity
+        reps = []
+        for idy in identities:
+            reps.append(next(h for h, _s, _d, i in cands if i == idy))
+        return {"ambiguous": reps}
+
+    # one person: prefer an iMessage thread, then the most recent.
+    best = max(cands, key=lambda c: (1 if c[1] == "iMessage" else 0, c[2]))
+    handle, svc = best[0], best[1]
+    if force_service:
+        stype = force_service
+    elif svc == "iMessage":
+        stype = "iMessage"
+    elif svc == "SMS":
+        stype = "SMS"
+    else:
+        stype = "iMessage"
+    return {"handle": handle, "name": contacts.display(handle),
+            "service": stype, "new": False}
+
+
+def _verify_sent(handle, text):
+    """Re-read chat.db (fresh) to report is_sent/error for the just-sent msg."""
+    suf = digits(handle)[-8:] if digits(handle) else ""
+    hl = handle.lower()
+    for _ in range(4):
+        time.sleep(1.5)
+        con, tmp = open_db()
+        try:
+            rows = con.execute(
+                "SELECT m.is_sent AS sent, m.error AS err, m.text AS t, "
+                "m.attributedBody AS ab, h.id AS hid FROM message m "
+                "LEFT JOIN handle h ON h.ROWID = m.handle_id "
+                "WHERE m.is_from_me = 1 ORDER BY m.date DESC LIMIT 8"
+            ).fetchall()
+        finally:
+            con.close()
+            shutil.rmtree(tmp, ignore_errors=True)
+        for r in rows:
+            hid = (r["hid"] or "")
+            same_handle = (suf and digits(hid).endswith(suf)) or (hl and hl == hid.lower())
+            if not same_handle:
+                continue
+            if message_text(r["t"], r["ab"]).strip() == text.strip():
+                if r["err"]:
+                    return f"⚠️ 전송 오류 코드 {r['err']}"
+                if r["sent"]:
+                    return "✓ 전송 확인됨 (is_sent=1)"
+                return "⏳ 전송 요청됨 (아직 is_sent=0 — 잠시 후 반영)"
+    return "⏳ 전송 요청됨 (확인 보류 — chat.db 반영 지연)"
+
+
+def cmd_send(con, args, contacts):
+    force_service = "SMS" if args.sms else ("iMessage" if args.imessage else None)
+    text = " ".join(args.text).strip()
+    if not text:
+        _die("보낼 내용이 비어 있습니다.")
+
+    tgt = resolve_send_target(con, args.identifier, contacts, force_service)
+    if tgt is None:
+        _die(f"'{args.identifier}' 대상을 찾지 못했습니다. "
+             f"`msg threads`로 확인하거나 번호/이메일을 직접 쓰세요.")
+    if tgt.get("group"):
+        _die("그룹 대화 전송은 아직 미지원입니다. (ROADMAP의 다음 단계)")
+    if tgt.get("ambiguous"):
+        reps = tgt["ambiguous"]
+        lines = "\n".join(f"  {i}. {contacts.display(h)}  ({h})"
+                          for i, h in enumerate(reps, 1))
+        # non-interactive (or --force) → safe error, don't guess a recipient
+        if args.force or not sys.stdin.isatty():
+            _die("대상이 여러 명입니다. 번호/이메일로 정확히 지정하세요:\n" + lines)
+        print("대상이 여러 명입니다. 누구에게 보낼까요?\n" + lines)
+        try:
+            pick = input("번호 선택 (취소: Enter) : ").strip()
+        except EOFError:
+            pick = ""
+        if not pick.isdigit() or not (1 <= int(pick) <= len(reps)):
+            print("취소했습니다.")
+            return
+        chosen = reps[int(pick) - 1]
+        tgt = resolve_send_target(con, chosen, contacts, force_service)
+        if not tgt or tgt.get("ambiguous") or tgt.get("group"):
+            _die(f"선택한 대상({chosen})을 확정하지 못했습니다.")
+
+    handle, name, stype = tgt["handle"], tgt["name"], tgt["service"]
+    label = name if (name and name != handle) else handle
+
+    print("─ 전송 미리보기 ─")
+    print(f"  받는 사람 : {label}" + (f"   ({handle})" if label != handle else ""))
+    print(f"  서비스    : {stype}" + ("    ⚠️ 새 대화(기존 스레드 없음)" if tgt.get("new") else ""))
+    print(f"  내용      : {text}")
+
+    if args.dry_run:
+        print("  (--dry-run: 실제로 보내지 않았습니다)")
+        return
+
+    if not args.force:
+        try:
+            ans = input("보낼까요? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("취소했습니다.")
+            return
+
+    ok, msg = send_via_messages(handle, text, stype)
+    if not ok:
+        _die(msg)
+    print(f"✓ {msg}")
+    if not args.no_verify:
+        print("  " + _verify_sent(handle, text))
+
+
+# --------------------------------------------------------------------------
 # complete (shell autocompletion candidates)
 # --------------------------------------------------------------------------
 def cmd_complete(args, contacts):
@@ -674,6 +893,17 @@ def main():
                     help="필터됨/알 수 없는 발신자 폴더까지 포함")
     pu.add_argument("--json", action="store_true")
 
+    for cmd_name, h in (("send", "메시지 보내기 (미리보기+확인)"),
+                        ("reply", "메시지 보내기 (send의 별칭)")):
+        ps = sub.add_parser(cmd_name, help=h)
+        ps.add_argument("identifier", help="전화번호/이메일/이름/chat_identifier")
+        ps.add_argument("text", nargs="+", help="보낼 내용")
+        ps.add_argument("--force", "-f", action="store_true", help="확인 없이 바로 발송")
+        ps.add_argument("--dry-run", action="store_true", help="미리보기만, 안 보냄")
+        ps.add_argument("--sms", action="store_true", help="SMS로 강제")
+        ps.add_argument("--imessage", action="store_true", help="iMessage로 강제")
+        ps.add_argument("--no-verify", action="store_true", help="전송 후 확인 생략")
+
     pc = sub.add_parser("complete", help="자동완성 후보 출력 (셸 completion용)")
     pc.add_argument("prefix", nargs="?", default="")
 
@@ -690,6 +920,8 @@ def main():
             cmd_read(con, args, contacts)
         elif args.cmd == "unread":
             cmd_unread(con, args, contacts)
+        elif args.cmd in ("send", "reply"):
+            cmd_send(con, args, contacts)
     finally:
         con.close()
         shutil.rmtree(tmp, ignore_errors=True)

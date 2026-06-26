@@ -1,8 +1,8 @@
 # messages-cli (`msg` / `messages`)
 
-macOS **메시지(Messages)** 앱 대화를 읽는 읽기 전용 CLI. stdlib만 사용(외부 의존성 0).
-더 큰 `msg` CLI(읽기+보내기)의 **읽기 절반**이며, Claude Code(SKILL.md)·Codex(AGENTS.md)
-양쪽에서 호출할 single source of truth를 목표로 한다. (보내기는 별도 세션.)
+macOS **메시지(Messages)** 앱 대화를 **읽고 보내는** CLI. stdlib만 사용(외부 의존성 0).
+읽기는 `chat.db`를 read-only로 보고, 보내기는 Messages.app을 osascript로 구동한다(chat.db에 쓰지 않음).
+Claude Code·Codex 양쪽에서 호출할 single source of truth(SKILL.md 심링크)를 목표로 한다.
 
 ## 설치
 실물 파일은 `~/dev/messages-cli/msg`. PATH에는 심링크 두 개로 노출:
@@ -33,6 +33,8 @@ source ~/dev/messages-cli/completions/msg.zsh
 msg threads [--limit N] [--json]            # 최근 대화 스레드 목록 (기본 20)
 msg read <identifier> [--limit N] [--json]  # 특정 스레드 메시지 (기본 40)
 msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (Messages 메인 파란 점; --all=필터 폴더까지)
+msg send <identifier> <text…>               # 보내기 (미리보기+확인; --force/--dry-run/--sms/--imessage)
+msg reply <identifier> <text…>              # send의 별칭
 msg complete [prefix]                        # 자동완성 후보 출력 (셸 completion용)
 ```
 `<identifier>`: **연락처 이름**·전화번호(끝 8자리 느슨 매칭, `010…`/`+8210…` 무관)·이메일·
@@ -54,6 +56,17 @@ msg read hong@example.com    # → 발신자가 연락처 이름으로 표시됨
 ```
 `--json`: `{date, from, handle, contact, is_from_me, service, text, has_attachment}` 배열.
 `from`=표시명(이름 or 핸들), `handle`=원본 번호/이메일, `contact`=연락처 이름(없으면 `""`).
+
+보내기 (⚠️ 실제 전송):
+```
+msg send 홍길동 "내일 봬요"          # 미리보기 → y/N 확인 → 전송, 후 is_sent 확인
+msg send 홍길동 "..." --dry-run      # 미리보기만(안 보냄)
+msg send 홍길동 "..." --force        # 확인 생략하고 바로
+msg send 821012345678 "..." --sms    # SMS로 강제 (기본은 스레드 service 자동)
+```
+같은 사람의 여러 핸들은 자동으로 하나 고르고(iMessage·최근 우선), 서로 다른 사람이 매칭되면
+번호로 고르라고 되묻는다(오발송 방지). Automation 권한 필요(System Settings > Privacy &
+Security > Automation > 터미널 → Messages).
 
 ## 설계 노트 (헤맨 지점 = 미래의 함정 방지)
 - **읽기 전용 보장 + 최신 메시지**: live `chat.db`는 WAL 잠금/최신 누락이 있어
@@ -94,11 +107,16 @@ msg read hong@example.com    # → 발신자가 연락처 이름으로 표시됨
   `(SMS)`/`(RCS)` 라벨. 그룹은 `chat_handle_join`→`handle.id`로 참여자 매핑.
 - **첨부**: `cache_has_attachments` 또는 본문에 U+FFFC(object-replacement)가 있으면 `[첨부]` 표시.
   파일 경로 해석은 stretch(미구현).
+- **보내기**: `osascript`로 Messages.app 구동 — `send "<text>" to buddy "<handle>" of <service>`.
+  핸들·본문은 argv로 넘겨 이스케이프 문제 회피. 서비스는 런타임에 `service type`으로 탐색.
+  전송은 chat.db에 직접 안 쓰고, 전송 후 `is_sent`/`error`를 다시 읽어 결과 확인.
+  자기 번호로 SMS는 단말 특성상 `is_sent=0`(Not Delivered) — 타 번호는 정상.
 
 ## 검증 메모
 - `attributedBody` 디코더: 알고 있는 최근 메시지로 정답 대조(한글/이모지/멀티라인 포함).
 - 한글·이모지·긴 메시지·멀티라인 정상. 전체 DB 디코드 실패율 사실상 0(빈 메시지 제외).
+- 보내기: iMessage·SMS 실수신자 대상 `is_sent=1` 확인. `msg send` 미리보기+확인·`--dry-run` 동작.
 
-## 범위 밖 (다음 세션)
-보내기(osascript / SMS 릴레이), 첨부 파일 경로 해석.
-(연락처 이름 매핑·이름 검색·탭 자동완성은 구현됨.)
+## 범위 밖 (다음)
+그룹/첨부 전송, `msg write`($EDITOR)·`msg draft`(Drafts 통합), 첨부 파일 경로 해석.
+(읽기·연락처·검색·탭완성·iMessage/SMS 1:1 보내기는 구현됨. 자세한 계획은 `ROADMAP.md`.)
