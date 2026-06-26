@@ -12,15 +12,26 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
 > 원칙: **읽기 도구는 read-only로 그대로 둔다.** 보내기는 명확히 분리된 opt-in 모듈로,
 > 외부로 나가는 동작이라 미리보기·확인을 기본값으로 한다.
 
-### A0. 전송 메커니즘 (macOS 현실)
-- **유일하게 현실적인 길 = `osascript`로 Messages.app 제어.**
-  - iMessage(개별): `tell application "Messages" to send "<text>" to buddy "<handle>" of (1st service whose service type = iMessage)`
-  - 기존 채팅/그룹: `send "<text>" to chat id "<guid>"`
-  - **SMS**: `service "SMS"` 경유 — 아이폰 **문자 전달(Text Message Forwarding)** 켜져 있어야만. 취약.
-- **알려진 함정(반드시 먼저 검증)**:
-  - 최근 macOS(Sonoma/Sequoia+)에서 AppleScript `send to buddy`가 깨졌다는 보고 다수 → `chat id` 경유가 더 안정적일 수 있음. **실기기에서 1건 테스트로 확인 후 설계 확정.**
-  - **Automation 권한** 필요: System Settings > Privacy & Security > Automation > (터미널) → Messages 허용. 없으면 FDA처럼 친절 안내.
+### A0. 전송 메커니즘 — **실기기 검증 완료 ✅ (2026-06-26, Darwin 25.5)**
+- **확정 레시피**: `osascript`로 Messages.app 제어, 핸들+서비스 명시:
+  ```applescript
+  tell application "Messages"
+    set svc to service id "<service-uuid>"        -- 런타임 탐색으로 얻음
+    send "<text>" to buddy "<handle>" of svc
+  end tell
+  ```
+  - **iMessage 자기 전송 테스트 → `is_sent=1` 도착 확인.** 우려했던 `send to buddy` 깨짐 **없음**.
+  - **SMS 전송 → 메시지 생성됨**(self-SMS는 단말이 확인 안 해 `is_sent=0`이지만, 타 번호 SMS는 `is_sent=1` 확인 — 릴레이 정상).
+- **서비스 탐색**: `services`를 돌며 `service type`(iMessage/SMS/RCS)으로 식별.
+  일부 레거시/비활성 서비스는 `service type` 접근 시 `-10000` → `try`로 스킵.
+  대상 핸들이 iMessage 등록이면 iMessage 서비스, 아니면 SMS 서비스 선택(스레드 기존 service도 참고).
+- **상태 확인**: 전송 후 chat.db의 해당 행 `is_sent`/`is_delivered`/`error`로 결과 판정.
+- **샌드박스 함정**: AppleEvent는 샌드박스에서 막혀 `-1712` 타임아웃. 실제 `msg`는 일반 셸에서
+  osascript를 호출하므로 무관하나, 자동화/CI 환경에선 주의(문서화).
+- **Automation 권한** 필요: System Settings > Privacy & Security > Automation > (터미널) → Messages 허용.
+  첫 호출 시 팝업 → 없으면 FDA처럼 친절 안내.
 - 대안(비공식 IMCore 등)은 비지원 → 다루지 않음.
+- (탐구거리) `send … to chat id "<guid>"` 경로 = 그룹/기존 스레드 답장용. 다음 단계에서 검증.
 
 ### A1. 명령 표면 (제안)
 - `msg send <id> <text…>` — 해당 스레드/상대에게 즉시 전송(미리보기+확인 후).
@@ -89,7 +100,8 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
 2. 전송: **미리보기+y/N 기본**, `--force`면 바로 발송
 3. 범위: **iMessage + SMS 동시**(첫 단계 실기기 검증 포함)
 
-### 착수 시 첫 스텝 (다음 세션)
-1. 실기기에서 osascript `send` 1건 테스트(iMessage·SMS 각각) — `chat id` vs `buddy` 안정성 확인.
-2. `msg send/reply` MVP(미리보기+확인) → `msg write`($EDITOR) → `msg draft`(composition.plist).
-3. Automation 권한 안내 추가, 전송 모듈을 읽기 모듈과 분리(별 파일/명령군).
+### 착수 스텝
+1. ~~실기기 osascript `send` 검증(iMessage·SMS)~~ **완료 ✅** — A0 레시피 확정.
+2. `msg send/reply` MVP(미리보기+확인, `--force`/`--dry-run`) — A0 레시피로 구현, chat.db로 결과 판정.
+3. `msg write`($EDITOR 작성) → `msg draft`(composition.plist 생성).
+4. Automation 권한 안내 추가, 전송 모듈을 읽기 모듈과 분리(별 파일/명령군).
