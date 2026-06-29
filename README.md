@@ -119,6 +119,15 @@ Security > Automation > 터미널 → Messages).
   전송은 chat.db에 직접 안 쓰고, 전송 후 `is_sent`/`error`를 다시 읽어 결과 확인.
   자기 번호로 SMS는 단말 특성상 `is_sent=0`(Not Delivered) — 타 번호는 정상.
 
+## 테스트
+stdlib `unittest`만 사용(의존성 0). **합성 chat.db 픽스처**(temp/메모리)라 실제 메시지 데이터는 안 건드림.
+```
+python3 tests/test_msg.py            # 또는: python3 -m unittest discover -s tests
+```
+43개 테스트: attributedBody 디코더(한글/이모지/길이 0x81/마커없음), 날짜(ns·초 epoch·end-of-day),
+이름 조합(CJK 성+이름/라틴/닉/조직), unread 뱃지(is_read·last_read·is_filtered·`--all`), 검색(blob/필터),
+첨부 경로 해석, 전송 대상 해석(동일인 collapse·신규·--sms).
+
 ## 검증 메모
 - `attributedBody` 디코더: 알고 있는 최근 메시지로 정답 대조(한글/이모지/멀티라인 포함).
 - 한글·이모지·긴 메시지·멀티라인 정상. 전체 DB 디코드 실패율 사실상 0(빈 메시지 제외).

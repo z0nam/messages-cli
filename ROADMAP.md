@@ -88,7 +88,7 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
 
 ## C. 인프라 / 품질
 
-- **테스트**: 합성 chat.db 픽스처로 디코더·날짜·매칭·unread 단위테스트.
+- ~~**테스트**: 합성 chat.db 픽스처로 디코더·날짜·매칭·unread·검색·첨부·전송대상 단위테스트~~ **완료 ✅** (`tests/test_msg.py`, 43개, stdlib unittest).
 - 성능: 큰 `-n`/검색용 인덱스 활용, 연락처 캐시.
 - 설정파일 `~/.config/msg/config.toml`(기본 limit, 계정 등).
 - 패키징: `pipx`/`uv tool`로 설치 가능하게, 버전·`--version`.
