@@ -403,5 +403,28 @@ class TestResolveSendTarget(DBTest):
         self.assertEqual(tgt["service"], "SMS")
 
 
+class TestDraftCompose(unittest.TestCase):
+    def test_archived_attributed_string_roundtrip(self):
+        import plistlib
+        blob = MSG._archived_attributed_string("안녕 👋\n둘째 줄")
+        inner = plistlib.loads(blob)
+        self.assertEqual(inner["$archiver"], "NSKeyedArchiver")
+        self.assertEqual(inner["$objects"][2]["NS.string"], "안녕 👋\n둘째 줄")
+        self.assertEqual(inner["$objects"][6]["$classname"],
+                         "NSMutableAttributedString")
+
+    def test_compose_strips_comment_lines(self):
+        def fake_run(cmd, *a, **k):
+            with open(cmd[-1], "w", encoding="utf-8") as f:
+                f.write("실제 본문\n# 주석은 무시\n둘째 본문\n")
+        orig = MSG.subprocess.run
+        MSG.subprocess.run = fake_run
+        try:
+            body = MSG._compose_in_editor("")
+        finally:
+            MSG.subprocess.run = orig
+        self.assertEqual(body, "실제 본문\n둘째 본문")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

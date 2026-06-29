@@ -959,65 +959,170 @@ def _verify_sent(handle, text):
     return "⏳ 전송 요청됨 (확인 보류 — chat.db 반영 지연)"
 
 
-def cmd_send(con, args, contacts):
-    force_service = "SMS" if args.sms else ("iMessage" if args.imessage else None)
-    text = " ".join(args.text).strip()
-    if not text:
-        _die("보낼 내용이 비어 있습니다.")
-
-    tgt = resolve_send_target(con, args.identifier, contacts, force_service)
+def _resolve_or_die(con, contacts, identifier, force_service, interactive=True):
+    """Resolve a send/draft target, handling group/ambiguous. Returns the
+    resolved target dict, or exits (cleanly on user cancel)."""
+    tgt = resolve_send_target(con, identifier, contacts, force_service)
     if tgt is None:
-        _die(f"'{args.identifier}' 대상을 찾지 못했습니다. "
+        _die(f"'{identifier}' 대상을 찾지 못했습니다. "
              f"`msg threads`로 확인하거나 번호/이메일을 직접 쓰세요.")
     if tgt.get("group"):
-        _die("그룹 대화 전송은 아직 미지원입니다. (ROADMAP의 다음 단계)")
+        _die("그룹 대화는 아직 미지원입니다. (ROADMAP의 다음 단계)")
     if tgt.get("ambiguous"):
         reps = tgt["ambiguous"]
         lines = "\n".join(f"  {i}. {contacts.display(h)}  ({h})"
                           for i, h in enumerate(reps, 1))
-        # non-interactive (or --force) → safe error, don't guess a recipient
-        if args.force or not sys.stdin.isatty():
+        if not interactive or not sys.stdin.isatty():
             _die("대상이 여러 명입니다. 번호/이메일로 정확히 지정하세요:\n" + lines)
-        print("대상이 여러 명입니다. 누구에게 보낼까요?\n" + lines)
+        print("대상이 여러 명입니다. 누구일까요?\n" + lines)
         try:
             pick = input("번호 선택 (취소: Enter) : ").strip()
         except EOFError:
             pick = ""
         if not pick.isdigit() or not (1 <= int(pick) <= len(reps)):
             print("취소했습니다.")
-            return
-        chosen = reps[int(pick) - 1]
-        tgt = resolve_send_target(con, chosen, contacts, force_service)
+            sys.exit(0)
+        tgt = resolve_send_target(con, reps[int(pick) - 1], contacts, force_service)
         if not tgt or tgt.get("ambiguous") or tgt.get("group"):
-            _die(f"선택한 대상({chosen})을 확정하지 못했습니다.")
+            _die("선택한 대상을 확정하지 못했습니다.")
+    return tgt
 
+
+def _preview_target(tgt, text, kind="전송"):
     handle, name, stype = tgt["handle"], tgt["name"], tgt["service"]
     label = name if (name and name != handle) else handle
-
-    print("─ 전송 미리보기 ─")
+    print(f"─ {kind} 미리보기 ─")
     print(f"  받는 사람 : {label}" + (f"   ({handle})" if label != handle else ""))
-    print(f"  서비스    : {stype}" + ("    ⚠️ 새 대화(기존 스레드 없음)" if tgt.get("new") else ""))
+    print(f"  서비스    : {stype}"
+          + ("    ⚠️ 새 대화(기존 스레드 없음)" if tgt.get("new") else ""))
     print(f"  내용      : {text}")
 
-    if args.dry_run:
+
+def _confirm(prompt):
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _do_send(con, contacts, identifier, text, force_service,
+             force, dry_run, no_verify):
+    text = (text or "").strip()
+    if not text:
+        _die("보낼 내용이 비어 있습니다.")
+    tgt = _resolve_or_die(con, contacts, identifier, force_service)
+    _preview_target(tgt, text, "전송")
+    if dry_run:
         print("  (--dry-run: 실제로 보내지 않았습니다)")
         return
-
-    if not args.force:
-        try:
-            ans = input("보낼까요? [y/N] ").strip().lower()
-        except EOFError:
-            ans = ""
-        if ans not in ("y", "yes"):
-            print("취소했습니다.")
-            return
-
-    ok, msg = send_via_messages(handle, text, stype)
+    if not force and not _confirm("보낼까요? [y/N] "):
+        print("취소했습니다.")
+        return
+    ok, msg = send_via_messages(tgt["handle"], text, tgt["service"])
     if not ok:
         _die(msg)
     print(f"✓ {msg}")
-    if not args.no_verify:
-        print("  " + _verify_sent(handle, text))
+    if not no_verify:
+        print("  " + _verify_sent(tgt["handle"], text))
+
+
+def cmd_send(con, args, contacts):
+    force_service = "SMS" if args.sms else ("iMessage" if args.imessage else None)
+    _do_send(con, contacts, args.identifier, " ".join(args.text), force_service,
+             args.force, args.dry_run, args.no_verify)
+
+
+def cmd_write(con, args, contacts):
+    """Compose the body in $EDITOR, then send (preview + confirm)."""
+    force_service = "SMS" if args.sms else ("iMessage" if args.imessage else None)
+    text = _compose_in_editor(args.template)
+    if not text.strip():
+        _die("내용이 비어 있어 취소했습니다.")
+    _do_send(con, contacts, args.identifier, text, force_service,
+             args.force, args.dry_run, args.no_verify)
+
+
+def _compose_in_editor(initial=""):
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+    fd, path = tempfile.mkstemp(prefix="msg-compose-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(initial or "")
+            f.write("\n\n# 이 줄(#로 시작) 위에 보낼 내용을 적으세요. 저장 후 종료.\n")
+        subprocess.run([*editor.split(), path])
+        with open(path, encoding="utf-8") as f:
+            body = f.read()
+    finally:
+        os.unlink(path)
+    lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith("#")]
+    return "\n".join(lines).strip()
+
+
+# --------------------------------------------------------------------------
+# draft — write into Messages.app's own Drafts folder (shows up in the app)
+# --------------------------------------------------------------------------
+def _archived_attributed_string(text):
+    """NSKeyedArchiver bplist of an NSMutableAttributedString(text) — the exact
+    shape Messages stores in Drafts/<handle>/composition.plist's `text` key."""
+    import plistlib
+    U = plistlib.UID
+    objects = [
+        "$null",
+        {"NSString": U(2), "$class": U(6), "NSAttributes": U(4)},
+        {"$class": U(3), "NS.string": text},
+        {"$classname": "NSMutableString",
+         "$classes": ["NSMutableString", "NSString", "NSObject"]},
+        {"NS.keys": [], "NS.objects": [], "$class": U(5)},
+        {"$classname": "NSDictionary", "$classes": ["NSDictionary", "NSObject"]},
+        {"$classname": "NSMutableAttributedString",
+         "$classes": ["NSMutableAttributedString", "NSAttributedString", "NSObject"]},
+    ]
+    archive = {"$version": 100000, "$archiver": "NSKeyedArchiver",
+               "$top": {"root": U(1)}, "$objects": objects}
+    return plistlib.dumps(archive, fmt=plistlib.FMT_BINARY)
+
+
+def write_draft(handle, text):
+    """Create ~/Library/Messages/Drafts/<handle>/composition.plist.
+    Backs up any existing draft. Returns the written path."""
+    import plistlib
+    folder = os.path.expanduser(
+        os.path.join("~/Library/Messages/Drafts", handle))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "composition.plist")
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".msgbak")
+    comp = {"audioMessage": False, "text": _archived_attributed_string(text)}
+    with open(path, "wb") as f:
+        plistlib.dump(comp, f, fmt=plistlib.FMT_XML)
+    # validate round-trip
+    with open(path, "rb") as f:
+        back = plistlib.load(f)
+    inner = plistlib.loads(back["text"])
+    if inner["$objects"][2]["NS.string"] != text:
+        raise ValueError("draft round-trip mismatch")
+    return path
+
+
+def cmd_draft(con, args, contacts):
+    text = " ".join(args.text).strip()
+    if not text:
+        _die("드래프트 내용이 비어 있습니다.")
+    tgt = _resolve_or_die(con, contacts, args.identifier, None)
+    handle = tgt["handle"]
+    _preview_target(tgt, text, "드래프트 저장")
+    if not args.force and not _confirm("이 드래프트를 Messages에 저장할까요? [y/N] "):
+        print("취소했습니다.")
+        return
+    try:
+        path = write_draft(handle, text)
+    except PermissionError:
+        _die("Drafts 폴더에 쓸 권한이 없습니다 (Full Disk Access 확인).")
+    except Exception as e:
+        _die(f"드래프트 저장 실패: {e}")
+    print(f"✓ 드래프트 저장됨: {path}")
+    print("  Messages 앱에서 해당 대화에 입력 중인 텍스트로 보입니다 "
+          "(안 보이면 앱 재시작).")
 
 
 # --------------------------------------------------------------------------
@@ -1090,6 +1195,20 @@ def main():
         ps.add_argument("--imessage", action="store_true", help="iMessage로 강제")
         ps.add_argument("--no-verify", action="store_true", help="전송 후 확인 생략")
 
+    pw = sub.add_parser("write", help="$EDITOR로 작성해서 보내기")
+    pw.add_argument("identifier", help="전화번호/이메일/이름/chat_identifier")
+    pw.add_argument("--template", default="", help="에디터 초기 내용")
+    pw.add_argument("--force", "-f", action="store_true", help="확인 없이 바로 발송")
+    pw.add_argument("--dry-run", action="store_true")
+    pw.add_argument("--sms", action="store_true")
+    pw.add_argument("--imessage", action="store_true")
+    pw.add_argument("--no-verify", action="store_true")
+
+    pd = sub.add_parser("draft", help="Messages 앱 드래프트로 저장 (안 보냄)")
+    pd.add_argument("identifier", help="전화번호/이메일/이름/chat_identifier")
+    pd.add_argument("text", nargs="+", help="드래프트 내용")
+    pd.add_argument("--force", "-f", action="store_true", help="확인 없이 저장")
+
     pc = sub.add_parser("complete", help="자동완성 후보 출력 (셸 completion용)")
     pc.add_argument("prefix", nargs="?", default="")
 
@@ -1110,6 +1229,10 @@ def main():
             cmd_search(con, args, contacts)
         elif args.cmd in ("send", "reply"):
             cmd_send(con, args, contacts)
+        elif args.cmd == "write":
+            cmd_write(con, args, contacts)
+        elif args.cmd == "draft":
+            cmd_draft(con, args, contacts)
     finally:
         con.close()
         shutil.rmtree(tmp, ignore_errors=True)

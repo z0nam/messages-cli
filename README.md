@@ -36,6 +36,8 @@ msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (Messages 
 msg search <query> [--from ID] [--since D] [--until D] [-n N] [--json]   # 전체 본문 검색
 msg send <identifier> <text…>               # 보내기 (미리보기+확인; --force/--dry-run/--sms/--imessage)
 msg reply <identifier> <text…>              # send의 별칭
+msg write <identifier>                       # $EDITOR로 작성해서 보내기
+msg draft <identifier> <text…>              # Messages 앱 드래프트로 저장 (안 보냄)
 msg complete [prefix]                        # 자동완성 후보 출력 (셸 completion용)
 ```
 `<identifier>`: **연락처 이름**·전화번호(끝 8자리 느슨 매칭, `010…`/`+8210…` 무관)·이메일·
@@ -118,6 +120,10 @@ Security > Automation > 터미널 → Messages).
   핸들·본문은 argv로 넘겨 이스케이프 문제 회피. 서비스는 런타임에 `service type`으로 탐색.
   전송은 chat.db에 직접 안 쓰고, 전송 후 `is_sent`/`error`를 다시 읽어 결과 확인.
   자기 번호로 SMS는 단말 특성상 `is_sent=0`(Not Delivered) — 타 번호는 정상.
+- **드래프트(`draft`)**: Messages 앱의 `~/Library/Messages/Drafts/<handle>/composition.plist`에
+  직접 쓴다. `text` 키는 **NSKeyedArchiver로 아카이브된 NSMutableAttributedString**(평문) —
+  `plistlib`로 순수 파이썬 생성(pyobjc 불필요). 기존 드래프트는 `.msgbak`으로 백업 후 덮어쓰고,
+  쓴 뒤 round-trip 검증. 앱이 캐시해서 재시작 전엔 안 보일 수 있음.
 
 ## 테스트
 stdlib `unittest`만 사용(의존성 0). **합성 chat.db 픽스처**(temp/메모리)라 실제 메시지 데이터는 안 건드림.
@@ -134,5 +140,5 @@ python3 tests/test_msg.py            # 또는: python3 -m unittest discover -s t
 - 보내기: iMessage·SMS 실수신자 대상 `is_sent=1` 확인. `msg send` 미리보기+확인·`--dry-run` 동작.
 
 ## 범위 밖 (다음)
-그룹/첨부 전송, `msg write`($EDITOR)·`msg draft`(Drafts 통합), 첨부 파일 경로 해석.
-(읽기·연락처·검색·탭완성·iMessage/SMS 1:1 보내기는 구현됨. 자세한 계획은 `ROADMAP.md`.)
+그룹/첨부 전송, `msg watch`(실시간 tail), `msg export`, 패키징·CI.
+(읽기·연락처·검색·첨부 경로·탭완성·iMessage/SMS 1:1 보내기·write·draft·테스트는 구현됨. 계획은 `ROADMAP.md`.)

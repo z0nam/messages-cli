@@ -107,5 +107,6 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
 2. ~~`msg send`/`reply` MVP(미리보기+확인, `--force`/`--dry-run`/`--sms`/`--imessage`)~~ **완료 ✅**
    — A0 레시피로 구현, 전송 후 chat.db `is_sent`/`error`로 결과 판정. 동일인 다중 핸들 자동 선택,
    서로 다른 사람은 인터랙티브 디스앰비그. Automation 권한 안내 포함. 자기 self-send is_sent=1 확인.
-3. (다음) `msg write`($EDITOR 작성) → `msg draft`(composition.plist 생성, A2 포맷).
+3. ~~`msg write`($EDITOR 작성) → `msg draft`(composition.plist 생성, A2 포맷)~~ **완료 ✅**
+   — draft는 plistlib로 NSKeyedArchiver 생성, 백업+round-trip 검증. 실기기 저장 확인.
 4. (다음) 그룹 전송(`send … to chat id "<guid>"`), 첨부 전송.
