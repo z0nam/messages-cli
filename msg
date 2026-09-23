@@ -24,6 +24,37 @@ from datetime import datetime
 COCOA_EPOCH = 978307200  # seconds between 1970-01-01 and 2001-01-01 UTC
 DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
 
+# "Send to myself" — resolves to the machine OWNER's own handle, read from
+# per-user config (NEVER hardcoded), so on each person's Mac these words map to
+# that person. Sources, in order: env MSG_SELF, then a `self=` line in
+# ~/.config/msg/config. Self-sends must go over iMessage (the device can't SMS
+# its own number → is_sent=0), so a matched self target is forced to iMessage.
+SELF_KEYWORDS = {
+    "me", "self", "myself", "나", "내", "본인",
+    "나에게", "나한테", "내게", "내번호", "내 번호", "제번호", "제 번호",
+}
+SELF_CONFIG = os.path.expanduser("~/.config/msg/config")
+
+
+def self_handle():
+    """Owner's own handle from per-user config, or None if unset."""
+    v = (os.environ.get("MSG_SELF") or "").strip()
+    if v:
+        return v
+    try:
+        with open(SELF_CONFIG, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("self=") or line.startswith("self ="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def is_self_identifier(identifier):
+    return (identifier or "").strip().lower() in SELF_KEYWORDS
+
 # Make stdout UTF-8 regardless of locale so Korean never mojibakes.
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -246,7 +277,10 @@ class Contacts:
         for db in paths:
             try:
                 con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
-            except sqlite3.OperationalError:
+            except sqlite3.Error:
+                # Includes DatabaseError "authorization denied" that macOS TCC
+                # raises when a background daemon lacks Contacts access. The
+                # Messages read still works, just without contact-name mapping.
                 continue
             try:
                 self._load_one(con, seen)
@@ -859,6 +893,14 @@ def resolve_send_target(con, identifier, contacts, force_service):
       {group: True}                                   — matched a group (unsupported)
       None                                            — nothing matched
     """
+    if is_self_identifier(identifier):
+        me = self_handle()
+        if not me:
+            return {"self_unset": True}
+        # self-send only delivers over iMessage
+        return {"handle": me, "name": contacts.display(me) or "나(본인)",
+                "service": force_service or "iMessage", "new": True}
+
     chat_ids, parts = find_chats(con, identifier, contacts)
     if not chat_ids:
         # brand-new target typed directly as a phone/email?
@@ -966,6 +1008,10 @@ def _resolve_or_die(con, contacts, identifier, force_service, interactive=True):
     if tgt is None:
         _die(f"'{identifier}' 대상을 찾지 못했습니다. "
              f"`msg threads`로 확인하거나 번호/이메일을 직접 쓰세요.")
+    if tgt.get("self_unset"):
+        _die("'내 번호'가 설정돼 있지 않습니다. 본인 번호를 등록하세요:\n"
+             "  echo 'self=+8210XXXXXXXX' >> ~/.config/msg/config\n"
+             "  (또는 환경변수 MSG_SELF=+8210XXXXXXXX)")
     if tgt.get("group"):
         _die("그룹 대화는 아직 미지원입니다. (ROADMAP의 다음 단계)")
     if tgt.get("ambiguous"):

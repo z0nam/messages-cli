@@ -139,6 +139,28 @@ python3 tests/test_msg.py            # 또는: python3 -m unittest discover -s t
 - 한글·이모지·긴 메시지·멀티라인 정상. 전체 DB 디코드 실패율 사실상 0(빈 메시지 제외).
 - 보내기: iMessage·SMS 실수신자 대상 `is_sent=1` 확인. `msg send` 미리보기+확인·`--dry-run` 동작.
 
+## MCP 서버 (다른 에이전트에서 쓰기)
+`mcp_server.py`는 `msg` CLI를 얇게 감싼 **stdio MCP 서버**(stdlib-only, 의존성 0). Claude Code·Codex·
+Gemini CLI·Claude Desktop·Cursor 등 MCP stdio 클라이언트 어디서든 붙는다. 노출 툴:
+`messages_threads` · `messages_read` · `messages_unread` · `messages_search` · `messages_send` · `messages_draft`.
+- **send 게이트**: `messages_send`는 `confirm=true`일 때만 실제 전송. 그 외엔 `--dry-run` 미리보기만
+  돌려준다(CLI 자체도 TTY 없으면 `--force` 없이는 안 보냄 — 이중 안전).
+- 등록:
+  ```
+  claude mcp add -s user messages -- python3 /path/to/messages-cli/mcp_server.py   # Claude Code
+  # Codex: ~/.codex/config.toml 에 [mcp_servers.messages] command="python3" args=["…/mcp_server.py"]
+  ```
+- 로컬 데이터(각자 맥의 chat.db)라 서버는 그 맥에서 돌아야 한다.
+
+### 원격/폰 표면 (HTTP + Bearer)
+`http_server.py` — 같은 CLI 코어 위의 **MCP Streamable-HTTP + Bearer** 서버(stdlib-only). 폰의
+ChatGPT/Claude 앱을 커스텀 커넥터로 붙여 내 맥 Messages를 원격 사용. 127.0.0.1 바인드 + cloudflared
+TLS 터널(`msg.namun.net`)로 노출.
+- **read는 Bearer로 바로**, **send는 폰 승인 게이트**: `confirm=true` → 대상 해석·미리보기 →
+  ntfy 푸시(Approve/Deny 버튼) → 폰에서 Approve 탭 → `/approve`(HMAC 서명·1회용·TTL) → 실제 전송.
+  프롬프트 인젝션으로 모델이 낚여도 **내 손가락 탭 없이는 안 나감**.
+- 세팅·시크릿·터널·커넥터 등록·위협 모델은 **`SETUP-REMOTE.md`**. 시크릿은 repo 밖(`~/.config/msg/http.env`).
+
 ## 범위 밖 (다음)
 그룹/첨부 전송, `msg watch`(실시간 tail), `msg export`, 패키징·CI.
 (읽기·연락처·검색·첨부 경로·탭완성·iMessage/SMS 1:1 보내기·write·draft·테스트는 구현됨. 계획은 `ROADMAP.md`.)

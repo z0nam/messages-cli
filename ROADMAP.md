@@ -86,6 +86,21 @@ attributedBody 디코딩, zsh 탭완성, Claude·Codex 공용 SKILL.md.
 - 그룹: 발신자별 색/이름 정렬, 참여자 목록 `msg info <id>`.
 - `msg contacts <query>` — 연락처 조회(이름↔핸들).
 
+## D. MCP (다중 에이전트/플랫폼 표면)
+
+- ~~**stdio MCP 서버**(`mcp_server.py`, stdlib-only): `msg` CLI를 얇게 래핑.
+  read 계열(threads/read/unread/search) + 게이트된 send/draft 노출.
+  send는 `confirm=true`일 때만 실제 전송(그 외 `--dry-run` 미리보기).
+  Claude Code(`claude mcp add -s user`)·Codex(`~/.codex/config.toml`) 등록 완료.~~ **완료 ✅ (2026-07-08)**
+- ~~**streamable-HTTP + Bearer** 표면(`http_server.py`, stdlib-only): 같은 CLI 코어 위.
+  read는 Bearer로 바로. **send는 폰 승인 게이트**(confirm=true → ntfy 푸시 → 폰 Approve 탭 →
+  `/approve`(HMAC 서명·1회용) → 실제 전송). 127.0.0.1 바인드 + cloudflared TLS 터널.
+  로컬 코어·승인 플로우·리플레이 방지 검증 완료.~~ **코어 완료 ✅ (2026-07-09)**
+  - go-live(시크릿·`msg.namun.net` 터널·launchd·커넥터 등록)는 `SETUP-REMOTE.md`. 사용자 인프라 필요.
+  - 개인·로컬 데이터라 전사 호스팅 대상은 아님(각자 맥의 chat.db).
+- (다음) launchd plist 템플릿, Telegram 인라인버튼 승인 대안, 읽기/쓰기 토큰 분리.
+- Gemini CLI 등록(설치 시).
+
 ## C. 인프라 / 품질
 
 - ~~**테스트**: 합성 chat.db 픽스처로 디코더·날짜·매칭·unread·검색·첨부·전송대상 단위테스트~~ **완료 ✅** (`tests/test_msg.py`, 43개, stdlib unittest).

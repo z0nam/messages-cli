@@ -9,3 +9,9 @@ AddressBook*
 __pycache__/
 *.pyc
 .DS_Store
+
+# Never commit secrets (Bearer token, approve secret, ntfy topic, tunnel creds)
+*.env
+.env
+secrets*
+*.pem
