@@ -46,6 +46,7 @@ NTFY_URL = os.environ.get("MSG_NTFY_URL", "").rstrip("/")
 SEND_ENABLED = os.environ.get("MSG_SEND_ENABLED", "") == "1"
 SEND_DRYRUN = os.environ.get("MSG_SEND_DRYRUN", "") == "1"  # approve → --dry-run (safe test)
 APPROVE_TTL = 180  # seconds a pending send stays approvable
+MAX_BODY = 1 << 20  # 1 MiB cap on request bodies (MCP messages are tiny)
 
 
 def log(*a):
@@ -224,9 +225,14 @@ class Handler(BaseHTTPRequestHandler):
         want = f"Bearer {TOKEN}"
         return bool(TOKEN) and hmac.compare_digest(h, want)
 
-    def _read_body(self):
-        n = int(self.headers.get("Content-Length", "0") or "0")
-        return self.rfile.read(n) if n else b""
+    def _body_len(self):
+        try:
+            return int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            return -1
+
+    def _read_body(self, n):
+        return self.rfile.read(n) if n > 0 else b""
 
     # -- approval callbacks (from the ntfy button; no Bearer, uses HMAC sig) --
     def _handle_decision(self, decided):
@@ -254,16 +260,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
-        # Always drain the request body first: on HTTP/1.1 keep-alive an
-        # unread body would be mis-parsed as the next request.
-        raw = self._read_body()
+        # Reject oversized bodies BEFORE reading them: /approve and /deny are
+        # unauthenticated, so on the public tunnel an attacker could otherwise
+        # POST a huge Content-Length and exhaust memory. Close the connection so
+        # we don't have to drain the (unread, possibly huge) body.
+        n = self._body_len()
+        if n < 0 or n > MAX_BODY:
+            self.close_connection = True
+            return self._text(413, "request body too large")
+        # Otherwise drain the body first: on HTTP/1.1 keep-alive an unread body
+        # would be mis-parsed as the next request.
+        raw = self._read_body(n)
         # Path-embedded token: clients that can't set an Authorization header
         # (e.g. Claude's iOS custom connector, which only offers OAuth or none)
         # use https://host/<TOKEN>/mcp with "no auth". TLS encrypts the path.
+        # Compare the token segment in constant time (no startswith leak).
         path_token_ok = False
-        if TOKEN and path.startswith(f"/{TOKEN}/"):
-            path_token_ok = True
-            path = path[len(TOKEN) + 1:]   # strip "/<TOKEN>", keep "/mcp"
+        if TOKEN and path.startswith("/"):
+            seg, _, rest = path[1:].partition("/")
+            if rest and hmac.compare_digest(seg, TOKEN):
+                path_token_ok = True
+                path = "/" + rest          # strip "/<TOKEN>", keep "/mcp"
         if path == "/approve":
             return self._handle_decision("approved")
         if path == "/deny":
