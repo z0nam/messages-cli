@@ -9,6 +9,8 @@ AddressBook*
 __pycache__/
 *.pyc
 .DS_Store
+# 에이전트 셋업 스크립트가 로컬에 생성하는 스킬 미러(재생성 가능) — 커밋 안 함
+.agents/
 
 # Never commit secrets (Bearer token, approve secret, ntfy topic, tunnel creds)
 *.env
