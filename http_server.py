@@ -65,6 +65,7 @@ class Pending:
         self.event = threading.Event()
         self.result = None       # filled on approve/deny
         self.decided = None      # "approved" | "denied"
+        self.ok = None           # True/False once the send actually ran
 
 
 PENDING = {}
@@ -147,7 +148,10 @@ def _remote_send(identifier, text, service):
         PENDING.pop(pid, None)
     if pend.decided == "denied":
         return core.text_result("🚫 폰에서 거부됨 — 보내지 않았습니다.")
-    return core.text_result(f"✓ 폰 승인 후 전송됨\n{pend.result or ''}".strip())
+    if getattr(pend, "ok", False):
+        return core.text_result(f"✓ 폰 승인 후 전송됨\n{pend.result or ''}".strip())
+    return core.text_result(
+        f"⚠️ 승인됐으나 전송 실패:\n{pend.result or ''}".strip(), is_error=True)
 
 
 def _execute_approved(pend):
@@ -156,7 +160,13 @@ def _execute_approved(pend):
     final = "--dry-run" if SEND_DRYRUN else "--force"
     ok, out, err = core.run_msg(
         ["send", pend.identifier, pend.text, *svc, final], timeout=90)
-    pend.result = (out or err or "").strip()
+    pend.ok = ok
+    if ok:
+        pend.result = (out or "").strip()
+    else:  # surface the real failure (e.g. Automation/AppleEvent error) — don't mask it
+        pend.result = ((out or "").strip() + "\n" + (err or "").strip()).strip() \
+            or "전송 실패(원인 불명)"
+    log(f"send exec ok={ok} err={(err or '').strip()[:300]!r}")
     return ok
 
 

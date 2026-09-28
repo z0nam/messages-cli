@@ -91,6 +91,25 @@ launchd로 뜬 백그라운드 데몬은 그냥은 `chat.db`를 못 읽는다(Fu
 부수: 데몬 컨텍스트에선 AddressBook(연락처)도 TCC로 막힐 수 있는데, `msg`는 연락처를 못 읽으면
 **이름 없이 계속 진행**(크래시 안 함)하도록 되어 있다.
 
+### 4-Auto. ⚠️ 보내기엔 Automation(AppleEvents) 권한이 별도로 필요
+
+읽기(FDA)가 풀려도 **전송은 안 나간다.** 전송은 데몬이 `osascript`로 Messages.app을 제어하므로
+**Automation 권한**(`kTCCServiceAppleEvents`)이 별도로 필요하다. 증상: 승인은 됐는데 안 나가고, 데몬 로그에
+`send exec ok=False err='전송 시간 초과 — Automation 권한 팝업이 떠 있는지 확인하세요.'`(osascript -1712).
+
+Automation은 FDA와 달리 **System Settings에서 "+"로 수동 추가가 안 된다.** 앱이 제어를 시도할 때 뜨는
+**"MessagesRemote이(가) Messages을(를) 제어하려고 합니다" 팝업에 Allow**를 눌러야 항목이 생긴다.
+- 팝업은 **서버 호스트의 GUI 세션 화면**에 뜬다(헤드리스면 Parsec 등 원격 데스크톱으로 접속해 누른다).
+  osascript 타임아웃이 30초라 그 안에 눌러야 한다. **한 번 Allow면 영구.**
+- 확인:
+  ```bash
+  sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
+    "select client,auth_value,indirect_object_identifier from access \
+     where service='kTCCServiceAppleEvents' and client like '%msgremote%'"
+  # → net.namun.msgremote|2|com.apple.MobileSMS   (2=허용)
+  ```
+- 트리거 방법: 보내기를 한 번 시도(폰에서 confirm=true → Approve)하면 그 순간 팝업이 뜬다.
+
 ## 5. 폰 앱에 커넥터 등록
 
 인증은 **두 방식 중 하나**(같은 토큰):
