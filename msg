@@ -970,12 +970,30 @@ def resolve_send_target(con, identifier, contacts, force_service):
             "service": stype, "new": False}
 
 
-def _verify_sent(handle, text):
+def _max_message_rowid():
+    """Current max message ROWID — an attempt boundary so _verify_sent only
+    considers the row created by THIS send, not an earlier failed attempt to the
+    same handle with the same text (e.g. the iMessage row that triggered an SMS
+    fallback). Returns 0 if the db can't be read."""
+    try:
+        con, tmp = open_db()
+    except SystemExit:
+        return 0
+    try:
+        row = con.execute("SELECT MAX(ROWID) AS mx FROM message").fetchone()
+        return (row["mx"] or 0) if row else 0
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _verify_sent(handle, text, since_rowid=0):
     """Re-read chat.db (fresh) to judge the just-sent message. Returns a tuple:
       ("ok", None)        — is_sent=1, no error (delivered)
       ("error", err_code) — chat.db error != 0 (e.g. 22 = iMessage 미전송)
       ("pending", note)   — still is_sent=0 / not yet reflected
-    """
+    Only rows with ROWID > since_rowid are considered, so a prior failed attempt
+    (same handle+text) can never be mistaken for this one."""
     suf = digits(handle)[-8:] if digits(handle) else ""
     hl = handle.lower()
     for _ in range(4):
@@ -986,7 +1004,8 @@ def _verify_sent(handle, text):
                 "SELECT m.is_sent AS sent, m.error AS err, m.text AS t, "
                 "m.attributedBody AS ab, h.id AS hid FROM message m "
                 "LEFT JOIN handle h ON h.ROWID = m.handle_id "
-                "WHERE m.is_from_me = 1 ORDER BY m.date DESC LIMIT 8"
+                "WHERE m.is_from_me = 1 AND m.ROWID > ? ORDER BY m.date DESC LIMIT 8",
+                (since_rowid,),
             ).fetchall()
         finally:
             con.close()
@@ -1075,13 +1094,14 @@ def _send_and_verify(handle, text, service, force_service, no_verify, _can_fallb
     """Send, then make delivery the source of truth: a chat.db error (e.g. 22 =
     iMessage 미전송) is a FAILURE — never printed as success, exits non-zero. When
     iMessage was auto-selected and fails, retry once over SMS (issue #2)."""
+    boundary = _max_message_rowid()   # only rows created by THIS send count
     ok, msg = send_via_messages(handle, text, service)
     if not ok:
         _die(msg)   # osascript-level failure (Automation/NO_SERVICE/timeout)
     if no_verify:
         print(f"✓ {service} 전송 요청됨 (검증 생략 — 실제 전달은 미확인)")
         return
-    status, info = _verify_sent(handle, text)
+    status, info = _verify_sent(handle, text, since_rowid=boundary)
     if status == "ok":
         print(f"✓ 전송 확인됨 ({service}, is_sent=1)")
         return
