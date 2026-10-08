@@ -974,11 +974,12 @@ def _max_message_rowid():
     """Current max message ROWID — an attempt boundary so _verify_sent only
     considers the row created by THIS send, not an earlier failed attempt to the
     same handle with the same text (e.g. the iMessage row that triggered an SMS
-    fallback). Returns 0 if the db can't be read."""
-    try:
-        con, tmp = open_db()
-    except SystemExit:
-        return 0
+    fallback). Must be reliable: a missing boundary would let an older message
+    with the same handle+text be mistaken for this attempt (false confirm, or an
+    old failure firing the SMS fallback). So if chat.db can't be read we let
+    open_db abort BEFORE anything is sent rather than return a sentinel. (An
+    empty message table → 0 is a correct boundary: no prior rows to confuse.)"""
+    con, tmp = open_db()
     try:
         row = con.execute("SELECT MAX(ROWID) AS mx FROM message").fetchone()
         return (row["mx"] or 0) if row else 0
