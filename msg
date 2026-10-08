@@ -971,7 +971,11 @@ def resolve_send_target(con, identifier, contacts, force_service):
 
 
 def _verify_sent(handle, text):
-    """Re-read chat.db (fresh) to report is_sent/error for the just-sent msg."""
+    """Re-read chat.db (fresh) to judge the just-sent message. Returns a tuple:
+      ("ok", None)        — is_sent=1, no error (delivered)
+      ("error", err_code) — chat.db error != 0 (e.g. 22 = iMessage 미전송)
+      ("pending", note)   — still is_sent=0 / not yet reflected
+    """
     suf = digits(handle)[-8:] if digits(handle) else ""
     hl = handle.lower()
     for _ in range(4):
@@ -994,11 +998,11 @@ def _verify_sent(handle, text):
                 continue
             if message_text(r["t"], r["ab"]).strip() == text.strip():
                 if r["err"]:
-                    return f"⚠️ 전송 오류 코드 {r['err']}"
+                    return ("error", r["err"])
                 if r["sent"]:
-                    return "✓ 전송 확인됨 (is_sent=1)"
-                return "⏳ 전송 요청됨 (아직 is_sent=0 — 잠시 후 반영)"
-    return "⏳ 전송 요청됨 (확인 보류 — chat.db 반영 지연)"
+                    return ("ok", None)
+                return ("pending", "아직 is_sent=0 — 잠시 후 반영")
+    return ("pending", "확인 보류 — chat.db 반영 지연")
 
 
 def _resolve_or_die(con, contacts, identifier, force_service, interactive=True):
@@ -1064,12 +1068,34 @@ def _do_send(con, contacts, identifier, text, force_service,
     if not force and not _confirm("보낼까요? [y/N] "):
         print("취소했습니다.")
         return
-    ok, msg = send_via_messages(tgt["handle"], text, tgt["service"])
+    _send_and_verify(tgt["handle"], text, tgt["service"], force_service, no_verify)
+
+
+def _send_and_verify(handle, text, service, force_service, no_verify, _can_fallback=True):
+    """Send, then make delivery the source of truth: a chat.db error (e.g. 22 =
+    iMessage 미전송) is a FAILURE — never printed as success, exits non-zero. When
+    iMessage was auto-selected and fails, retry once over SMS (issue #2)."""
+    ok, msg = send_via_messages(handle, text, service)
     if not ok:
-        _die(msg)
-    print(f"✓ {msg}")
-    if not no_verify:
-        print("  " + _verify_sent(tgt["handle"], text))
+        _die(msg)   # osascript-level failure (Automation/NO_SERVICE/timeout)
+    if no_verify:
+        print(f"✓ {service} 전송 요청됨 (검증 생략 — 실제 전달은 미확인)")
+        return
+    status, info = _verify_sent(handle, text)
+    if status == "ok":
+        print(f"✓ 전송 확인됨 ({service}, is_sent=1)")
+        return
+    if status == "pending":
+        print(f"✓ 전송 요청됨 ({service}) — {info}")
+        return
+    # status == "error": the message is sitting un-delivered in Messages.app.
+    if (_can_fallback and service == "iMessage"
+            and (force_service or "").lower() != "imessage"):
+        print(f"⚠️ iMessage 전송 실패 (코드 {info}, 미전송) — SMS로 자동 재시도합니다…")
+        return _send_and_verify(handle, text, "SMS", force_service,
+                                no_verify, _can_fallback=False)
+    _die(f"⚠️ 전송 실패 (코드 {info}) — Messages.app에 미전송 상태로 남았습니다. "
+         f"상대가 {service}에 등록돼 있는지 확인하거나 다른 서비스(예: --sms)로 보내세요.")
 
 
 def cmd_send(con, args, contacts):
