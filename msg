@@ -996,7 +996,8 @@ def _verify_sent(handle, text, since_rowid=0):
     (same handle+text) can never be mistaken for this one."""
     suf = digits(handle)[-8:] if digits(handle) else ""
     hl = handle.lower()
-    for _ in range(4):
+    last_pending = None
+    for _ in range(5):
         time.sleep(1.5)
         con, tmp = open_db()
         try:
@@ -1020,8 +1021,11 @@ def _verify_sent(handle, text, since_rowid=0):
                     return ("error", r["err"])
                 if r["sent"]:
                     return ("ok", None)
-                return ("pending", "아직 is_sent=0 — 잠시 후 반영")
-    return ("pending", "확인 보류 — chat.db 반영 지연")
+                # Row exists but Messages hasn't set is_sent/error yet — it may
+                # still flip to error 22. Keep polling instead of returning now.
+                last_pending = ("pending", "아직 is_sent=0 — 잠시 후 반영")
+                break
+    return last_pending or ("pending", "확인 보류 — chat.db 반영 지연")
 
 
 def _resolve_or_die(con, contacts, identifier, force_service, interactive=True):
@@ -1109,7 +1113,11 @@ def _send_and_verify(handle, text, service, force_service, no_verify, _can_fallb
         print(f"✓ 전송 요청됨 ({service}) — {info}")
         return
     # status == "error": the message is sitting un-delivered in Messages.app.
-    if (_can_fallback and service == "iMessage"
+    # SMS fallback only makes sense for a phone handle — an email destination
+    # (also iMessage-capable) can't be routed over SMS, so retrying would just
+    # guarantee a second failure.
+    phone_like = "@" not in handle and len(digits(handle)) >= 7
+    if (_can_fallback and service == "iMessage" and phone_like
             and (force_service or "").lower() != "imessage"):
         print(f"⚠️ iMessage 전송 실패 (코드 {info}, 미전송) — SMS로 자동 재시도합니다…")
         return _send_and_verify(handle, text, "SMS", force_service,
