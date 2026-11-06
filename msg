@@ -897,9 +897,11 @@ def resolve_send_target(con, identifier, contacts, force_service):
         me = self_handle()
         if not me:
             return {"self_unset": True}
-        # self-send only delivers over iMessage
+        # self-send only delivers over iMessage (SMS to your own number fails
+        # with error 4). The "self" flag tells _send_and_verify to retry over
+        # iMessage — never fall back to SMS — when a send fails.
         return {"handle": me, "name": contacts.display(me) or "나(본인)",
-                "service": force_service or "iMessage", "new": True}
+                "service": force_service or "iMessage", "new": True, "self": True}
 
     chat_ids, parts = find_chats(con, identifier, contacts)
     if not chat_ids:
@@ -1092,13 +1094,26 @@ def _do_send(con, contacts, identifier, text, force_service,
     if not force and not _confirm("보낼까요? [y/N] "):
         print("취소했습니다.")
         return
-    _send_and_verify(tgt["handle"], text, tgt["service"], force_service, no_verify)
+    _send_and_verify(tgt["handle"], text, tgt["service"], force_service, no_verify,
+                     is_self=tgt.get("self", False))
 
 
-def _send_and_verify(handle, text, service, force_service, no_verify, _can_fallback=True):
+# How many extra iMessage attempts a self-send makes after the first one fails.
+_SELF_RETRY_LIMIT = 2
+
+
+def _send_and_verify(handle, text, service, force_service, no_verify,
+                     _can_fallback=True, is_self=False, _self_tries=0):
     """Send, then make delivery the source of truth: a chat.db error (e.g. 22 =
-    iMessage 미전송) is a FAILURE — never printed as success, exits non-zero. When
-    iMessage was auto-selected and fails, retry once over SMS (issue #2)."""
+    iMessage 미전송) is a FAILURE — never printed as success, exits non-zero.
+
+    On failure the retry depends on the target:
+      * self-send → retry over iMessage (up to _SELF_RETRY_LIMIT times). The first
+        iMessage to a not-yet-existing self-thread often fails with code 22 and a
+        manual re-send succeeds; SMS fallback is wrong here because texting your
+        own number fails with error 4 (issue: self-send stuck as 발송 실패).
+      * everyone else → retry once over SMS when iMessage was auto-selected for a
+        phone handle (issue #2)."""
     boundary = _max_message_rowid()   # only rows created by THIS send count
     ok, msg = send_via_messages(handle, text, service)
     if not ok:
@@ -1114,17 +1129,27 @@ def _send_and_verify(handle, text, service, force_service, no_verify, _can_fallb
         print(f"✓ 전송 요청됨 ({service}) — {info}")
         return
     # status == "error": the message is sitting un-delivered in Messages.app.
-    # SMS fallback only makes sense for a phone handle — an email destination
-    # (also iMessage-capable) can't be routed over SMS, so retrying would just
-    # guarantee a second failure.
+    # Self-send: retry iMessage (the thread now exists, so the re-send usually
+    # goes through), never SMS.
+    if is_self and service == "iMessage" and _self_tries < _SELF_RETRY_LIMIT:
+        print(f"⚠️ 나에게 보낸 iMessage 미전송 (코드 {info}) — iMessage로 자동 재시도합니다…")
+        time.sleep(2.0)   # let Messages register the just-created self-thread
+        return _send_and_verify(handle, text, "iMessage", force_service, no_verify,
+                                _can_fallback=False, is_self=True,
+                                _self_tries=_self_tries + 1)
+    # Everyone else: SMS fallback only makes sense for a phone handle — an email
+    # destination (also iMessage-capable) can't be routed over SMS, so retrying
+    # would just guarantee a second failure.
     phone_like = "@" not in handle and len(digits(handle)) >= 7
-    if (_can_fallback and service == "iMessage" and phone_like
+    if (_can_fallback and not is_self and service == "iMessage" and phone_like
             and (force_service or "").lower() != "imessage"):
         print(f"⚠️ iMessage 전송 실패 (코드 {info}, 미전송) — SMS로 자동 재시도합니다…")
         return _send_and_verify(handle, text, "SMS", force_service,
                                 no_verify, _can_fallback=False)
-    _die(f"⚠️ 전송 실패 (코드 {info}) — Messages.app에 미전송 상태로 남았습니다. "
-         f"상대가 {service}에 등록돼 있는지 확인하거나 다른 서비스(예: --sms)로 보내세요.")
+    extra = ("  (나에게 보내기는 iMessage만 쓰며, 여러 번 재시도했지만 실패했습니다)"
+             if is_self else
+             f" 상대가 {service}에 등록돼 있는지 확인하거나 다른 서비스(예: --sms)로 보내세요.")
+    _die(f"⚠️ 전송 실패 (코드 {info}) — Messages.app에 미전송 상태로 남았습니다.{extra}")
 
 
 def cmd_send(con, args, contacts):

@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from importlib.machinery import SourceFileLoader
@@ -401,6 +402,89 @@ class TestResolveSendTarget(DBTest):
     def test_force_sms(self):
         tgt = MSG.resolve_send_target(self.con, "+821011112222", self.c, "SMS")
         self.assertEqual(tgt["service"], "SMS")
+
+    def test_self_target_flags_imessage(self):
+        orig = os.environ.get("MSG_SELF")
+        os.environ["MSG_SELF"] = "+821063432884"
+        try:
+            tgt = MSG.resolve_send_target(self.con, "me", self.c, None)
+        finally:
+            if orig is None:
+                os.environ.pop("MSG_SELF", None)
+            else:
+                os.environ["MSG_SELF"] = orig
+        self.assertTrue(tgt.get("self"))
+        self.assertEqual(tgt["service"], "iMessage")
+        self.assertEqual(tgt["handle"], "+821063432884")
+
+
+class TestSendAndVerify(unittest.TestCase):
+    """_send_and_verify retry behavior: self → retry iMessage (never SMS),
+    everyone else → SMS fallback for a failed auto-iMessage to a phone."""
+
+    def setUp(self):
+        self.calls = []            # services actually attempted, in order
+        self._orig = {k: getattr(MSG, k) for k in
+                      ("_max_message_rowid", "send_via_messages",
+                       "_verify_sent", "_die", "time")}
+
+        class _Died(Exception):
+            pass
+        self.Died = _Died
+
+        MSG._max_message_rowid = lambda: 0
+        MSG.time = types.SimpleNamespace(sleep=lambda *_: None)
+
+        def fake_die(m):
+            raise _Died(m)
+        MSG._die = fake_die
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(MSG, k, v)
+
+    def _wire(self, verify_results):
+        it = iter(verify_results)
+
+        def fake_send(handle, text, service):
+            self.calls.append(service)
+            return True, "ok"
+
+        def fake_verify(handle, text, since_rowid=0):
+            return next(it)
+
+        MSG.send_via_messages = fake_send
+        MSG._verify_sent = fake_verify
+
+    def _run(self, **kw):
+        kw.setdefault("handle", "+821063432884")
+        kw.setdefault("text", "hi")
+        kw.setdefault("service", "iMessage")
+        kw.setdefault("force_service", None)
+        kw.setdefault("no_verify", False)
+        return MSG._send_and_verify(**kw)
+
+    def test_self_retries_imessage_then_succeeds(self):
+        self._wire([("error", "22"), ("ok", None)])
+        out = capture_text(lambda: self._run(is_self=True))
+        self.assertEqual(self.calls, ["iMessage", "iMessage"])
+        self.assertNotIn("SMS", self.calls)
+        self.assertIn("확인됨", out)
+
+    def test_self_never_falls_back_to_sms(self):
+        self._wire([("error", "22")] * (MSG._SELF_RETRY_LIMIT + 1))
+        with self.assertRaises(self.Died):
+            capture_text(lambda: self._run(is_self=True))
+        self.assertNotIn("SMS", self.calls)
+        # 1 initial attempt + _SELF_RETRY_LIMIT retries, all iMessage
+        self.assertEqual(self.calls,
+                         ["iMessage"] * (MSG._SELF_RETRY_LIMIT + 1))
+
+    def test_nonself_imessage_falls_back_to_sms(self):
+        self._wire([("error", "22"), ("ok", None)])
+        out = capture_text(lambda: self._run(is_self=False))
+        self.assertEqual(self.calls, ["iMessage", "SMS"])
+        self.assertIn("확인됨", out)
 
 
 class TestDraftCompose(unittest.TestCase):
