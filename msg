@@ -220,6 +220,51 @@ def digits(s):
     return re.sub(r"\D", "", s or "")
 
 
+def _canon_phone(h):
+    """Digits of a phone handle in international form: a domestic Korean number
+    (010…, no '+') becomes 8210…, so `+821011112222` and `01011112222` compare
+    equal. Used only for exact-match checks."""
+    h = (h or "").strip()
+    d = digits(h)
+    if not h.startswith("+") and d.startswith("0") and not d.startswith("00"):
+        return "82" + d[1:]
+    return d
+
+
+# Country names for the international-number guard. Longest prefix wins, so
+# 852 (홍콩) beats 85x and 1 (북미) only catches what nothing longer does.
+_COUNTRY_NAMES = {
+    "1": "미국/캐나다", "7": "러시아/카자흐스탄", "33": "프랑스", "34": "스페인",
+    "39": "이탈리아", "44": "영국", "49": "독일", "60": "말레이시아",
+    "61": "호주", "62": "인도네시아", "63": "필리핀", "64": "뉴질랜드",
+    "65": "싱가포르", "66": "태국", "81": "일본", "84": "베트남", "86": "중국",
+    "91": "인도", "850": "북한", "852": "홍콩", "853": "마카오", "855": "캄보디아",
+    "856": "라오스", "880": "방글라데시", "886": "대만", "971": "아랍에미리트",
+    "976": "몽골", "977": "네팔", "998": "우즈베키스탄",
+}
+
+
+def intl_country(handle):
+    """For a phone handle with a non-Korean country code, return
+    (country_code, country_name); otherwise None. Email handles and domestic
+    numbers (010…, or +82…) are never international."""
+    h = (handle or "").strip()
+    if not h or "@" in h:
+        return None
+    if h.startswith("+"):
+        d = digits(h)
+    elif h.startswith("00"):
+        d = digits(h)[2:]          # 00 international prefix
+    else:
+        return None                # domestic form → sent as +82
+    if len(d) < 7 or d.startswith("82"):
+        return None
+    for n in (3, 2, 1):
+        if d[:n] in _COUNTRY_NAMES:
+            return d[:n], _COUNTRY_NAMES[d[:n]]
+    return d[:3] if len(d) > 3 else d, "국외"
+
+
 def _has_cjk(s):
     return any(
         "぀" <= ch <= "鿿" or "가" <= ch <= "힣"
@@ -948,12 +993,21 @@ def resolve_send_target(con, identifier, contacts, force_service):
     # +86 thread next to the real +82 one). If any 1:1 candidate's handle is
     # exactly the typed number, the user has already disambiguated — keep only
     # those. Loose suffix ambiguity is left for inputs without a country code.
+    #
+    # And when nothing matches exactly, do NOT fall back to a same-suffix
+    # handle under another country code (issue: iPhone "reply as text" stored
+    # 010… numbers as +86…). Stop instead — a twin is never a valid guess for
+    # an explicitly typed country code.
     q = identifier.strip()
     if q.startswith("+") and "@" not in q and len(digits(q)) >= 7:
         exact = [c for c in cands
-                 if "@" not in c[0] and digits(c[0]) == digits(q)]
+                 if "@" not in c[0] and _canon_phone(c[0]) == _canon_phone(q)]
         if exact:
             cands = exact
+        else:
+            twins = [c[0] for c in cands if "@" not in c[0]]
+            if twins:
+                return {"twin_only": twins}
 
     identities = []
     for _h, _s, _d, idy in cands:
@@ -1044,10 +1098,36 @@ def _verify_sent(handle, text, since_rowid=0):
     return last_pending or ("pending", "확인 보류 — chat.db 반영 지연")
 
 
-def _resolve_or_die(con, contacts, identifier, force_service, interactive=True):
+def _resolve_or_die(con, contacts, identifier, force_service, interactive=True,
+                    allow_intl=None):
     """Resolve a send/draft target, handling group/ambiguous. Returns the
-    resolved target dict, or exits (cleanly on user cancel)."""
+    resolved target dict, or exits (cleanly on user cancel).
+
+    allow_intl: None = no international guard (drafts); False = stop on a
+    non-+82 phone handle; True = allow it (the preview still warns)."""
+    tgt = _resolve_target(con, contacts, identifier, force_service, interactive)
+    if allow_intl is not None and not tgt.get("self"):
+        cc = intl_country(tgt["handle"])
+        if cc:
+            tgt["intl"] = cc
+            if not allow_intl:
+                _die(f"국외 번호입니다: {tgt['handle']} (+{cc[0]} {cc[1]}). "
+                     f"기본적으로 국외 번호로는 보내지 않습니다.\n"
+                     f"  정말 이 번호로 보내야 하면 CLI는 --allow-intl, "
+                     f"MCP messages_send는 allow_international=true 를 붙이세요.\n"
+                     + (f"  (입력 '{identifier}' 가 기존 대화 {tgt['handle']} 로 해석됐습니다.)"
+                        if _canon_phone(identifier) != _canon_phone(tgt["handle"])
+                        else "  국내 번호라면 010… 또는 +8210… 형식으로 다시 지정하세요."))
+    return tgt
+
+
+def _resolve_target(con, contacts, identifier, force_service, interactive):
     tgt = resolve_send_target(con, identifier, contacts, force_service)
+    if tgt and tgt.get("twin_only"):
+        twins = ", ".join(tgt["twin_only"])
+        _die(f"'{identifier}' 와 정확히 일치하는 대화가 없습니다. "
+             f"끝자리만 같은 다른 번호({twins})로는 보내지 않습니다.\n"
+             f"  번호를 다시 확인하세요. (--allow-intl 로도 이 대상을 바꾸지 않습니다.)")
     if tgt is None:
         _die(f"'{identifier}' 대상을 찾지 못했습니다. "
              f"`msg threads`로 확인하거나 번호/이메일을 직접 쓰세요.")
@@ -1072,7 +1152,8 @@ def _resolve_or_die(con, contacts, identifier, force_service, interactive=True):
             print("취소했습니다.")
             sys.exit(0)
         tgt = resolve_send_target(con, reps[int(pick) - 1], contacts, force_service)
-        if not tgt or tgt.get("ambiguous") or tgt.get("group"):
+        if (not tgt or tgt.get("ambiguous") or tgt.get("group")
+                or tgt.get("twin_only")):
             _die("선택한 대상을 확정하지 못했습니다.")
     return tgt
 
@@ -1084,6 +1165,9 @@ def _preview_target(tgt, text, kind="전송"):
     print(f"  받는 사람 : {label}" + (f"   ({handle})" if label != handle else ""))
     print(f"  서비스    : {stype}"
           + ("    ⚠️ 새 대화(기존 스레드 없음)" if tgt.get("new") else ""))
+    if tgt.get("intl"):
+        cc, cname = tgt["intl"]
+        print(f"  ⚠️ 국외 번호(+{cc} {cname}) — --allow-intl 로 허용됨")
     print(f"  내용      : {text}")
 
 
@@ -1095,11 +1179,12 @@ def _confirm(prompt):
 
 
 def _do_send(con, contacts, identifier, text, force_service,
-             force, dry_run, no_verify):
+             force, dry_run, no_verify, allow_intl=False):
     text = (text or "").strip()
     if not text:
         _die("보낼 내용이 비어 있습니다.")
-    tgt = _resolve_or_die(con, contacts, identifier, force_service)
+    tgt = _resolve_or_die(con, contacts, identifier, force_service,
+                          allow_intl=bool(allow_intl))
     _preview_target(tgt, text, "전송")
     if dry_run:
         print("  (--dry-run: 실제로 보내지 않았습니다)")
@@ -1168,7 +1253,8 @@ def _send_and_verify(handle, text, service, force_service, no_verify,
 def cmd_send(con, args, contacts):
     force_service = "SMS" if args.sms else ("iMessage" if args.imessage else None)
     _do_send(con, contacts, args.identifier, " ".join(args.text), force_service,
-             args.force, args.dry_run, args.no_verify)
+             args.force, args.dry_run, args.no_verify,
+             getattr(args, "allow_intl", False))
 
 
 def cmd_write(con, args, contacts):
@@ -1178,7 +1264,8 @@ def cmd_write(con, args, contacts):
     if not text.strip():
         _die("내용이 비어 있어 취소했습니다.")
     _do_send(con, contacts, args.identifier, text, force_service,
-             args.force, args.dry_run, args.no_verify)
+             args.force, args.dry_run, args.no_verify,
+             getattr(args, "allow_intl", False))
 
 
 def _compose_in_editor(initial=""):
@@ -1520,6 +1607,8 @@ def main():
         ps.add_argument("--sms", action="store_true", help="SMS로 강제")
         ps.add_argument("--imessage", action="store_true", help="iMessage로 강제")
         ps.add_argument("--no-verify", action="store_true", help="전송 후 확인 생략")
+        ps.add_argument("--allow-intl", action="store_true",
+                        help="+82가 아닌 국외 번호로 보내기 허용 (기본은 차단)")
 
     pw = sub.add_parser("write", help="$EDITOR로 작성해서 보내기")
     pw.add_argument("identifier", help="전화번호/이메일/이름/chat_identifier")
@@ -1529,6 +1618,8 @@ def main():
     pw.add_argument("--sms", action="store_true")
     pw.add_argument("--imessage", action="store_true")
     pw.add_argument("--no-verify", action="store_true")
+    pw.add_argument("--allow-intl", action="store_true",
+                    help="+82가 아닌 국외 번호로 보내기 허용 (기본은 차단)")
 
     pd = sub.add_parser("draft", help="Messages 앱 드래프트로 저장 (안 보냄)")
     pd.add_argument("identifier", help="전화번호/이메일/이름/chat_identifier")

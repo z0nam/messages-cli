@@ -118,11 +118,20 @@ def _service_flag(a):
     return []
 
 
+def _send_flags(a):
+    """Service + international-number flags for `msg send`. Shared with
+    http_server so the remote path passes the same guard switches."""
+    flags = _service_flag(a)
+    if a.get("allow_international") is True:
+        flags.append("--allow-intl")
+    return flags
+
+
 def tool_send(a):
     ident, text = a.get("identifier"), a.get("text")
     if not ident or not text:
         return text_result("identifier와 text가 모두 필요합니다.", is_error=True)
-    args = ["send", str(ident), str(text), *_service_flag(a)]
+    args = ["send", str(ident), str(text), *_send_flags(a)]
     if a.get("confirm") is True:
         # Actually deliver. --force skips the (non-existent, no-TTY) confirm prompt.
         args.append("--force")
@@ -205,7 +214,10 @@ TOOLS = [
             "**사용자가 명시적으로 '보내라'고 요청했을 때만** confirm=true 로 호출해 실제 전송한다. "
             "그 외에는 confirm 생략(=false) → 미리보기(받는 사람·서비스·내용)만 돌려주고 보내지 않는다. "
             "확신이 없으면 항상 먼저 confirm=false로 미리보기를 사용자에게 보여주고 확정받아라. "
-            "service는 auto(기본)·imessage·sms."
+            "service는 auto(기본)·imessage·sms. "
+            "+82가 아닌 국외 번호(예: +86 중국)는 기본 차단 — 사용자가 그 국외 번호로 보내라고 "
+            "명시했을 때만 allow_international=true. +82로 지정했는데 끝자리만 같은 다른 국가 번호 "
+            "대화만 있으면 그쪽으로 보내지 않고 실패한다(allow_international로도 바뀌지 않음)."
         ),
         "inputSchema": {
             "type": "object",
@@ -214,6 +226,7 @@ TOOLS = [
                 "text": {"type": "string", "description": "보낼 내용"},
                 "confirm": {"type": "boolean", "description": "true여야 실제 전송. 생략/false면 미리보기만.", "default": False},
                 "service": {"type": "string", "enum": ["auto", "imessage", "sms"], "default": "auto", "description": "본인('me') 전송은 자동으로 iMessage."},
+                "allow_international": {"type": "boolean", "default": False, "description": "true면 +82가 아닌 국외 번호로도 보냄(미리보기에 경고 표시). 사용자가 그 국외 번호로 보내라고 명시했을 때만 true. 이메일·본인('me')은 해당 없음."},
             },
             "required": ["identifier", "text"],
         },

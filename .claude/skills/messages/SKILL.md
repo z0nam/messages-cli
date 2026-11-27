@@ -26,7 +26,7 @@ msg threads [--limit N] [--json]            # 최근 대화 스레드 목록 (�
 msg read <identifier> [--limit N] [--media] [--open] [--json]  # 스레드 메시지 (시간순)
 msg unread [--limit N] [--all] [--json]     # 안 읽은 메시지만 (기본=메인 받은편지함 파란 점)
 msg search <query> [--from ID] [--since YYYY-MM-DD] [--until ...] [--limit N] [--json]
-msg send <identifier> <text…> [--force] [--dry-run] [--sms|--imessage]
+msg send <identifier> <text…> [--force] [--dry-run] [--sms|--imessage] [--allow-intl]
 msg reply <identifier> <text…> [...]         # send의 별칭
 msg write <identifier> [--dry-run] [...]     # $EDITOR로 작성해서 보내기
 msg draft <identifier> <text…> [--force]     # Messages 앱 드래프트로 저장(안 보냄)
@@ -83,6 +83,10 @@ msg reply <상대> <보낼 내용…>     # send의 별칭
 - 대상 해석은 `read`와 동일(이름/번호/이메일). 같은 사람의 여러 핸들은 자동으로 하나 고름
   (iMessage·최근 대화 우선). **서로 다른 사람**이 매칭되면 번호로 고르라고 되묻는다(오발송 방지).
 - service 자동 선택: 기존 스레드가 iMessage면 iMessage, 아니면 SMS. `--sms`/`--imessage`로 강제.
+- **국외 번호(+82 외, 예: +86 중국)는 기본 차단** — 오류(exit≠0)로 멈춘다. 사용자가 **그 국외 번호로**
+  보내라고 명시했을 때만 `--allow-intl`(MCP `allow_international=true`). 허용해도 미리보기에 경고가 뜬다.
+  `+8210…`으로 지정했는데 끝자리만 같은 `+86…` 대화만 있으면 실패한다 — 그 쌍둥이로 바꿔 보내지 말고
+  사용자에게 번호를 확인받는다. 이메일·본인(`me`)·`draft`는 해당 없음.
 - 전송 후 chat.db의 `is_sent`/`error`로 결과를 확인해 알려준다(자기 번호로 SMS는 단말 특성상 실패).
 - **`msg write <상대>`**: `$EDITOR`로 본문 작성 → 미리보기+확인 후 전송(send와 동일 안전수칙).
 - **`msg draft <상대> <내용>`**: **보내지 않고** Messages 앱의 Drafts 폴더에 저장 →

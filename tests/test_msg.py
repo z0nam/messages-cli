@@ -723,5 +723,137 @@ class TestWatchHelpers(unittest.TestCase):
         self.assertFalse(m(None))
 
 
+# --------------------------------------------------------------------------
+# international-number guard (block non-+82 phone handles unless allowed)
+# --------------------------------------------------------------------------
+class TestIntlCountry(unittest.TestCase):
+    def test_china(self):
+        self.assertEqual(MSG.intl_country("+861026966114"), ("86", "중국"))
+
+    def test_longest_prefix(self):
+        self.assertEqual(MSG.intl_country("+85291234567"), ("852", "홍콩"))
+        self.assertEqual(MSG.intl_country("+14155550100"), ("1", "미국/캐나다"))
+
+    def test_domestic_and_email_are_not_intl(self):
+        for h in ("+821011112222", "01011112222", "010-1111-2222",
+                  "+861011112222@example.com", "friend@example.com", ""):
+            self.assertIsNone(MSG.intl_country(h), h)
+
+    def test_00_prefix(self):
+        self.assertEqual(MSG.intl_country("00861026966114"), ("86", "중국"))
+
+
+class TestIntlGuard(DBTest):
+    def _resolve(self, ident, allow):
+        err = io.StringIO()
+        from contextlib import redirect_stderr
+        with redirect_stderr(err):
+            try:
+                tgt = MSG._resolve_or_die(self.con, self.c, ident, None,
+                                          interactive=False, allow_intl=allow)
+                return tgt, err.getvalue()
+            except SystemExit as e:
+                return e, err.getvalue()
+
+    def _add_plus86_only(self):
+        # a +86 thread whose +82 counterpart does not exist in chat.db
+        self.con.execute("INSERT INTO handle (ROWID, id) VALUES (7, '+861077778888')")
+        self.con.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name, service_name, "
+            "guid) VALUES (70, '+861077778888', NULL, 'SMS', 'g70')")
+        self.con.execute("INSERT INTO chat_handle_join VALUES (70, 7)")
+
+    def test_blocks_foreign_number_by_default(self):
+        res, err = self._resolve("+8613912345678", False)
+        self.assertIsInstance(res, SystemExit)
+        self.assertNotEqual(res.code, 0)
+        self.assertIn("+86 중국", err)
+        self.assertIn("--allow-intl", err)
+        self.assertIn("allow_international", err)
+
+    def test_allow_flag_passes_with_preview_warning(self):
+        tgt, _ = self._resolve("+8613912345678", True)
+        self.assertEqual(tgt["handle"], "+8613912345678")
+        self.assertEqual(tgt["intl"], ("86", "중국"))
+        out = capture_text(MSG._preview_target, tgt, "hi")
+        self.assertIn("국외 번호(+86 중국)", out)
+
+    def test_domestic_number_not_blocked(self):
+        tgt, _ = self._resolve("+821011112222", False)
+        self.assertEqual(tgt["handle"], "+821011112222")
+        self.assertNotIn("intl", tgt)
+        tgt, _ = self._resolve("01033334444", False)   # new domestic target
+        self.assertNotIn("intl", tgt)
+
+    def test_local_input_resolving_to_foreign_thread_is_blocked(self):
+        self._add_plus86_only()
+        res, err = self._resolve("01077778888", False)
+        self.assertIsInstance(res, SystemExit)
+        self.assertIn("+861077778888", err)
+
+    def test_plus82_with_only_foreign_twin_fails_even_if_allowed(self):
+        self._add_plus86_only()
+        for allow in (False, True):
+            res, err = self._resolve("+821077778888", allow)
+            self.assertIsInstance(res, SystemExit, allow)
+            self.assertNotEqual(res.code, 0)
+            self.assertIn("정확히 일치하는 대화가 없습니다", err)
+
+    def test_twin_only_from_resolve_send_target(self):
+        self._add_plus86_only()
+        tgt = MSG.resolve_send_target(self.con, "+821077778888", self.c, None)
+        self.assertEqual(tgt, {"twin_only": ["+861077778888"]})
+
+    def test_exact_domestic_handle_still_counts_as_exact(self):
+        # a handle stored in domestic form (010…) equals +8210… input
+        self.con.execute("INSERT INTO handle (ROWID, id) VALUES (8, '01022223333')")
+        self.con.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name, service_name, "
+            "guid) VALUES (80, '01022223333', NULL, 'SMS', 'g80')")
+        self.con.execute("INSERT INTO chat_handle_join VALUES (80, 8)")
+        tgt = MSG.resolve_send_target(self.con, "+821022223333", self.c, None)
+        self.assertEqual(tgt["handle"], "01022223333")
+
+    def test_email_not_blocked(self):
+        tgt, _ = self._resolve("friend@example.com", False)
+        self.assertEqual(tgt["handle"], "friend@example.com")
+        self.assertNotIn("intl", tgt)
+
+    def test_self_not_blocked(self):
+        orig = os.environ.get("MSG_SELF")
+        os.environ["MSG_SELF"] = "+8613912345678"   # even a foreign self number
+        try:
+            tgt, _ = self._resolve("me", False)
+        finally:
+            if orig is None:
+                os.environ.pop("MSG_SELF", None)
+            else:
+                os.environ["MSG_SELF"] = orig
+        self.assertTrue(tgt.get("self"))
+        self.assertNotIn("intl", tgt)
+
+    def test_draft_path_has_no_guard(self):
+        tgt, _ = self._resolve("+8613912345678", None)
+        self.assertNotIn("intl", tgt)
+
+
+class TestSendFlags(unittest.TestCase):
+    def setUp(self):
+        import sys
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        import mcp_server
+        self.mcp = mcp_server
+
+    def test_allow_international_maps_to_flag(self):
+        self.assertEqual(self.mcp._send_flags({"allow_international": True}),
+                         ["--allow-intl"])
+        self.assertEqual(self.mcp._send_flags({"service": "sms"}), ["--sms"])
+        self.assertEqual(self.mcp._send_flags({"allow_international": "yes"}), [])
+
+    def test_schema_exposes_allow_international(self):
+        tool = [t for t in self.mcp.TOOLS if t["name"] == "messages_send"][0]
+        self.assertIn("allow_international", tool["inputSchema"]["properties"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

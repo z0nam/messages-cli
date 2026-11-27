@@ -68,10 +68,18 @@ msg send 홍길동 "내일 봬요"          # 미리보기 → y/N 확인 → �
 msg send 홍길동 "..." --dry-run      # 미리보기만(안 보냄)
 msg send 홍길동 "..." --force        # 확인 생략하고 바로
 msg send 821012345678 "..." --sms    # SMS로 강제 (기본은 스레드 service 자동)
+msg send +14155550100 "..." --allow-intl   # 국외 번호 허용 (기본은 차단)
 ```
 같은 사람의 여러 핸들은 자동으로 하나 고르고(iMessage·최근 우선), 서로 다른 사람이 매칭되면
 번호로 고르라고 되묻는다(오발송 방지). Automation 권한 필요(System Settings > Privacy &
 Security > Automation > 터미널 → Messages).
+
+**국외 번호 차단**: 해석된 대상이 +82가 아닌 국가번호의 전화번호면(예: `+86…` 중국) 기본적으로
+보내지 않고 오류로 멈춘다(아이폰 "문자로 응답"이 010 번호에 +86을 붙여 만든 스레드로 잘못 가는 사고 방지).
+정말 국외 번호로 보내야 하면 `--allow-intl`(MCP `messages_send`는 `allow_international=true`,
+원격 HTTP 경로도 같은 인자)을 붙인다 — 그래도 미리보기에 `⚠️ 국외 번호(+86 중국)` 경고가 뜬다.
+`+8210…`처럼 국가번호까지 지정했는데 정확히 같은 대화는 없고 끝자리만 같은 다른 국가 번호 대화만 있으면,
+그쪽으로 해석하지 않고 실패한다(`--allow-intl`로도 바뀌지 않음). 이메일 대상·본인(`me`)·`draft`는 해당 없음.
 
 ## 설계 노트 (헤맨 지점 = 미래의 함정 방지)
 - **읽기 전용 보장 + 최신 메시지**: live `chat.db`는 WAL 잠금/최신 누락이 있어
@@ -160,6 +168,7 @@ Gemini CLI·Claude Desktop·Cursor 등 MCP stdio 클라이언트 어디서든 �
 `messages_threads` · `messages_read` · `messages_unread` · `messages_search` · `messages_send` · `messages_draft`.
 - **send 게이트**: `messages_send`는 `confirm=true`일 때만 실제 전송. 그 외엔 `--dry-run` 미리보기만
   돌려준다(CLI 자체도 TTY 없으면 `--force` 없이는 안 보냄 — 이중 안전).
+  국외 번호(+82 외)는 `allow_international=true`일 때만 보낸다(→ `--allow-intl`).
 - 등록:
   ```
   claude mcp add -s user messages -- python3 /path/to/messages-cli/mcp_server.py   # Claude Code
