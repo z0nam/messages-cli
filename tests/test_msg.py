@@ -728,6 +728,13 @@ class TestWatchHelpers(unittest.TestCase):
         self.assertTrue(m("+821011112222"))
         self.assertFalse(m("+821099998888"))
 
+    def test_matcher_domestic_handle_rejects_foreign_twin(self):
+        # a stored 010… handle (= +82) must not accept the +86 twin's reply
+        m = MSG._watch_matcher("01077778888", FakeContacts())
+        self.assertTrue(m("01077778888"))
+        self.assertTrue(m("+821077778888"))
+        self.assertFalse(m("+861077778888"))
+
     def test_matcher_email_case_insensitive(self):
         m = MSG._watch_matcher("Friend@Example.com", FakeContacts())
         self.assertTrue(m("friend@example.com"))

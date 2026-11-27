@@ -1403,7 +1403,13 @@ def _watch_matcher(handle, contacts):
     alternate '+' number must share the resolved number's country/prefix).
     A '+'-prefixed number must match its digits EXACTLY (so a +86 twin with the
     same local digits never fires a +82 watch, cf. #5); a number typed without
-    a country code falls back to the last-8-digit suffix."""
+    a country code falls back to the last-8-digit suffix.
+
+    A domestic Korean handle (010…) means +82, so it is normalized first and
+    matched exactly too — otherwise a stored `010…` handle would let a `+86…`
+    twin's reply complete the watch."""
+    if _is_domestic_phone(handle):
+        handle = "+" + _canon_phone(handle)
     hl = handle.strip().lower()
     hd = digits(handle)
     name = contacts.name_for(handle)
@@ -1416,7 +1422,7 @@ def _watch_matcher(handle, contacts):
         elif hd and "@" not in hid:
             d = digits(hid)
             if hl.startswith("+"):
-                if d == hd:
+                if _canon_phone(hid) == hd:
                     return True
             elif len(hd) >= 7 and d.endswith(hd[-8:]):
                 return True
