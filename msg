@@ -1498,6 +1498,10 @@ def cmd_watch(args, contacts):
                        "(~/.config/msg/config 의 self= 또는 MSG_SELF).")
             elif tgt.get("group"):
                 err = "그룹 대화 감시는 아직 미지원입니다. `msg watch --any`를 쓰세요."
+            elif tgt.get("twin_only"):
+                err = (f"'{args.identifier}' 와 정확히 일치하는 대화가 없습니다 "
+                       f"(끝자리만 같은 다른 번호: {', '.join(tgt['twin_only'])}). "
+                       f"번호를 다시 확인하세요.")
             elif tgt.get("ambiguous"):
                 err = ("대상이 여러 명입니다. 번호/이메일로 정확히 지정하세요:\n"
                        + "\n".join(f"  {i}. {contacts.display(h)}  ({h})"

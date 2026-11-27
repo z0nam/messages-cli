@@ -615,6 +615,17 @@ class TestWatch(unittest.TestCase):
         self.assertEqual(hits[0]["from"], "홍길동")
         self.assertEqual(hits[0]["handle"], "+821011112222")
 
+    def test_plus82_with_only_foreign_twin_is_unresolved(self):
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO handle (ROWID, id) VALUES (7, '+861077778888')")
+        con.execute("INSERT INTO chat (ROWID, chat_identifier, service_name, guid) "
+                    "VALUES (70, '+861077778888', 'SMS', 'g70')")
+        con.execute("INSERT INTO chat_handle_join VALUES (70, 7)")
+        con.commit()
+        con.close()
+        code, _ = self.run_watch(identifier="+821077778888", timeout="0.05s")
+        self.assertEqual(code, MSG.WATCH_UNRESOLVED)
+
     def test_existing_messages_are_not_new(self):
         # rows already in the DB (incl. unread ones) predate the baseline
         code, _ = self.run_watch(identifier="+821011112222", timeout="0.05s",
