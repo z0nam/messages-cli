@@ -942,6 +942,18 @@ def resolve_send_target(con, identifier, contacts, force_service):
     if not cands:
         return {"group": True} if groups else None
 
+    # E.164 input (+country code): the phone-suffix match in find_chats also
+    # catches other country codes with the same local digits (e.g. a stray
+    # +86 thread next to the real +82 one). If any 1:1 candidate's handle is
+    # exactly the typed number, the user has already disambiguated — keep only
+    # those. Loose suffix ambiguity is left for inputs without a country code.
+    q = identifier.strip()
+    if q.startswith("+") and "@" not in q and len(digits(q)) >= 7:
+        exact = [c for c in cands
+                 if "@" not in c[0] and digits(c[0]) == digits(q)]
+        if exact:
+            cands = exact
+
     identities = []
     for _h, _s, _d, idy in cands:
         if idy not in identities:

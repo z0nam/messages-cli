@@ -7,6 +7,7 @@ Run:  python3 tests/test_msg.py            (from the repo root)
 Uses a synthetic in-temp chat.db so nothing touches the real Messages data.
 """
 import argparse
+import importlib.util
 import io
 import json
 import os
@@ -18,7 +19,10 @@ from contextlib import redirect_stdout
 from importlib.machinery import SourceFileLoader
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MSG = SourceFileLoader("msgmod", os.path.join(HERE, "..", "msg")).load_module()
+_loader = SourceFileLoader("msgmod", os.path.join(HERE, "..", "msg"))
+_spec = importlib.util.spec_from_loader("msgmod", _loader)
+MSG = importlib.util.module_from_spec(_spec)
+_loader.exec_module(MSG)  # load_module() was removed in Python 3.15
 COCOA = MSG.COCOA_EPOCH
 
 
@@ -402,6 +406,44 @@ class TestResolveSendTarget(DBTest):
     def test_force_sms(self):
         tgt = MSG.resolve_send_target(self.con, "+821011112222", self.c, "SMS")
         self.assertEqual(tgt["service"], "SMS")
+
+    def _add_plus86_twin(self):
+        # a stray +86 SMS thread sharing 홍길동's local digits (issue #5)
+        self.con.execute("INSERT INTO handle (ROWID, id) VALUES (5, '+861011112222')")
+        self.con.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name, service_name, "
+            "guid) VALUES (50, '+861011112222', NULL, 'SMS', 'g50')")
+        self.con.execute("INSERT INTO chat_handle_join VALUES (50, 5)")
+        self.con.execute(
+            "INSERT INTO message (ROWID, date, is_from_me, text, service, handle_id) "
+            "VALUES (7, ?, 1, 'x', 'SMS', 5)", (cns(1_780_000_900),))
+        self.con.execute("INSERT INTO chat_message_join VALUES (50, 7)")
+        self.c.by.pop("+821011112222", None)  # unknown number: no contact name
+
+    def test_e164_exact_handle_wins_over_suffix_twin(self):
+        self._add_plus86_twin()
+        tgt = MSG.resolve_send_target(self.con, "+821011112222", self.c, None)
+        self.assertNotIn("ambiguous", tgt)
+        self.assertEqual(tgt["handle"], "+821011112222")
+        tgt = MSG.resolve_send_target(self.con, "+861011112222", self.c, None)
+        self.assertEqual(tgt["handle"], "+861011112222")
+
+    def test_plus_email_not_treated_as_e164(self):
+        # an email like +8210...@x must not collapse onto the phone handle
+        self.c.by.pop("+821011112222", None)
+        self.con.execute("INSERT INTO handle (ROWID, id) VALUES (6, '+821011112222@example.com')")
+        self.con.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name, service_name, "
+            "guid) VALUES (60, '+821011112222@example.com', NULL, 'iMessage', 'g60')")
+        self.con.execute("INSERT INTO chat_handle_join VALUES (60, 6)")
+        tgt = MSG.resolve_send_target(self.con, "+821011112222@example.com", self.c, None)
+        self.assertNotEqual(tgt.get("handle"), "+821011112222")
+
+    def test_local_number_still_ambiguous_with_suffix_twin(self):
+        self._add_plus86_twin()
+        tgt = MSG.resolve_send_target(self.con, "01011112222", self.c, None)
+        self.assertIn("ambiguous", tgt)
+        self.assertEqual(set(tgt["ambiguous"]), {"+821011112222", "+861011112222"})
 
     def test_self_target_flags_imessage(self):
         orig = os.environ.get("MSG_SELF")
