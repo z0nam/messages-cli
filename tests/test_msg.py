@@ -15,7 +15,8 @@ import sqlite3
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 from importlib.machinery import SourceFileLoader
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -550,6 +551,176 @@ class TestDraftCompose(unittest.TestCase):
         finally:
             MSG.subprocess.run = orig
         self.assertEqual(body, "실제 본문\n둘째 본문")
+
+
+class TestWatch(unittest.TestCase):
+    """`msg watch` against a file-backed synthetic chat.db (DB_PATH patched).
+    Messages are injected from inside the patched sleep, i.e. mid-watch."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="msgtest-")
+        self.db = os.path.join(self.tmp, "chat.db")
+        mem = build_db()
+        disk = sqlite3.connect(self.db)
+        mem.backup(disk)
+        disk.close()
+        mem.close()
+        self._orig_path = MSG.DB_PATH
+        MSG.DB_PATH = self.db
+        self.c = FakeContacts(
+            by_handle={"+821011112222": "홍길동", "+821055556666": "홍길동"})
+        self.next_rowid = 100
+
+    def tearDown(self):
+        MSG.DB_PATH = self._orig_path
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def add(self, chat_id, handle_id, text, from_me=0):
+        con = sqlite3.connect(self.db)
+        rid = self.next_rowid
+        self.next_rowid += 1
+        con.execute(
+            "INSERT INTO message (ROWID, date, is_from_me, text, attributedBody, "
+            "service, handle_id) VALUES (?, ?, ?, NULL, ?, 'iMessage', ?)",
+            (rid, cns(1_790_000_000 + rid), from_me, ab(text), handle_id))
+        con.execute("INSERT INTO chat_message_join VALUES (?, ?)", (chat_id, rid))
+        con.commit()
+        con.close()
+
+    def run_watch(self, injections=(), **kw):
+        """Run cmd_watch; each sleep call pops one injection (a callable).
+        Returns (exit_code, stdout)."""
+        queue = list(injections)
+
+        def fake_sleep(_s):
+            if queue:
+                queue.pop(0)()
+
+        args = argparse.Namespace(**{**dict(
+            identifier=None, any=False, all=False, timeout="5s",
+            interval="1s", from_them_only=False, json=True), **kw})
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(MSG.time, "sleep", side_effect=fake_sleep), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = MSG.cmd_watch(args, self.c)
+        return code, out.getvalue()
+
+    def test_arrival_prints_and_exits_0(self):
+        code, out = self.run_watch(
+            [lambda: self.add(10, 1, "답장 드립니다")], identifier="+821011112222")
+        self.assertEqual(code, 0)
+        hits = json.loads(out)
+        self.assertEqual([h["text"] for h in hits], ["답장 드립니다"])
+        self.assertEqual(hits[0]["from"], "홍길동")
+        self.assertEqual(hits[0]["handle"], "+821011112222")
+
+    def test_existing_messages_are_not_new(self):
+        # rows already in the DB (incl. unread ones) predate the baseline
+        code, _ = self.run_watch(identifier="+821011112222", timeout="0.05s",
+                                 interval="0.01s")
+        self.assertEqual(code, 2)
+
+    def test_ignores_own_and_other_senders_until_target_replies(self):
+        code, out = self.run_watch([
+            lambda: self.add(10, None, "제가 보낸 것", from_me=1),
+            lambda: self.add(20, 2, "다른 사람"),
+            lambda: self.add(10, 1, "진짜 답장"),
+        ], identifier="홍길동")
+        self.assertEqual(code, 0)
+        self.assertEqual([h["text"] for h in json.loads(out)], ["진짜 답장"])
+
+    def test_same_person_other_handle_counts(self):
+        code, out = self.run_watch(
+            [lambda: self.add(40, 4, "문자로 답장")], identifier="+821011112222")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)[0]["handle"], "+821055556666")
+
+    def test_timeout_exits_2(self):
+        code, out = self.run_watch(
+            [lambda: self.add(20, 2, "다른 사람")], identifier="+821011112222",
+            timeout="0.05s", interval="0.01s")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+
+    def test_unresolved_exits_1(self):
+        code, _ = self.run_watch(identifier="없는사람")
+        self.assertEqual(code, 1)
+
+    def test_ambiguous_exits_1_without_prompt(self):
+        # "821" substring-matches two different people's phone chats
+        code, _ = self.run_watch(identifier="821")
+        self.assertEqual(code, 1)
+
+    def test_identifier_xor_any(self):
+        self.assertEqual(self.run_watch()[0], 1)
+        self.assertEqual(self.run_watch(identifier="홍길동", any=True)[0], 1)
+
+    def test_bad_duration_exits_1(self):
+        self.assertEqual(self.run_watch(identifier="홍길동", timeout="soon")[0], 1)
+
+    def test_any_skips_filtered_unless_all(self):
+        spam = lambda: self.add(30, 3, "(광고) 대출")
+        code, _ = self.run_watch([spam], any=True, timeout="0.05s", interval="0.01s")
+        self.assertEqual(code, 2)
+        code, out = self.run_watch([spam], any=True, all=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)[0]["chat"], "+821099998888")
+
+    def test_any_fires_on_any_incoming(self):
+        code, out = self.run_watch([lambda: self.add(20, 2, "안녕")], any=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)[0]["from"], "friend@example.com")
+
+    def test_text_output(self):
+        code, out = self.run_watch(
+            [lambda: self.add(10, 1, "확인했어요")], identifier="홍길동", json=False)
+        self.assertEqual(code, 0)
+        self.assertIn("새 메시지 1건", out)
+        self.assertIn("홍길동: 확인했어요", out)
+
+
+class TestWatchHelpers(unittest.TestCase):
+    def test_parse_duration(self):
+        P = MSG.parse_duration
+        self.assertEqual(P("90"), 90)
+        self.assertEqual(P("30s"), 30)
+        self.assertEqual(P("15m"), 900)
+        self.assertEqual(P("4h"), 14400)
+        self.assertEqual(P("0.5s"), 0.5)
+        with self.assertRaises(ValueError):
+            P("4 hours")
+
+    def test_matcher_e164_exact_not_suffix_twin(self):
+        # #5: a +86 handle sharing the local digits must not fire a +82 watch
+        m = MSG._watch_matcher("+821011112222", FakeContacts())
+        self.assertTrue(m("+821011112222"))
+        self.assertFalse(m("+861011112222"))
+        self.assertFalse(m("+821011112222@example.com"))
+
+    def test_matcher_contact_fallback_keeps_country_code(self):
+        # real Contacts.name_for resolves phones by last 8 digits — the +86 twin
+        # of either of the person's numbers must not pass via the name fallback
+        class Suffix8(FakeContacts):
+            def name_for(self, handle):
+                d = MSG.digits(handle or "")
+                return {"11112222": "홍길동", "55556666": "홍길동"}.get(d[-8:])
+        m = MSG._watch_matcher("+821011112222", Suffix8())
+        self.assertTrue(m("+821011112222"))
+        self.assertTrue(m("+821055556666"))   # same person, other number
+        self.assertFalse(m("+861011112222"))
+        self.assertFalse(m("+861055556666"))
+
+    def test_matcher_local_number_uses_suffix(self):
+        m = MSG._watch_matcher("010-1111-2222", FakeContacts())
+        self.assertTrue(m("+821011112222"))
+        self.assertFalse(m("+821099998888"))
+
+    def test_matcher_email_case_insensitive(self):
+        m = MSG._watch_matcher("Friend@Example.com", FakeContacts())
+        self.assertTrue(m("friend@example.com"))
+        self.assertFalse(m("other@example.com"))
+        self.assertFalse(m(None))
 
 
 if __name__ == "__main__":

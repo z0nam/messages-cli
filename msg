@@ -4,6 +4,7 @@
 Subcommands:
   msg threads [--limit N] [--json]            최근 대화 스레드 목록
   msg read <identifier> [--limit N] [--json]  특정 스레드의 메시지
+  msg watch <identifier>|--any [--timeout 4h] 새 수신 메시지가 오면 출력하고 종료
 
 Reads ~/Library/Messages/chat.db. Requires Full Disk Access for the terminal.
 The live DB (+ -wal/-shm sidecars) is copied to a temp dir and opened
@@ -1264,6 +1265,193 @@ def cmd_draft(con, args, contacts):
 
 
 # --------------------------------------------------------------------------
+# watch (wait for an incoming message, then exit — read-only)
+# --------------------------------------------------------------------------
+WATCH_ARRIVED, WATCH_UNRESOLVED, WATCH_TIMEOUT = 0, 1, 2
+
+
+def parse_duration(s):
+    """'90', '90s', '15m', '4h', '1d' -> seconds (float). Raises ValueError."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*", str(s).lower())
+    if not m:
+        raise ValueError(f"기간 형식을 알 수 없습니다: {s!r} (예: 90, 30s, 15m, 4h)")
+    return float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def _db_signature():
+    """(mtime_ns, size) of chat.db and its -wal — changes whenever Messages
+    writes, so the poll loop only re-copies the DB when something happened."""
+    sig = []
+    for suffix in ("", "-wal"):
+        try:
+            st = os.stat(DB_PATH + suffix)
+            sig.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append(None)
+    return tuple(sig)
+
+
+def _watch_matcher(handle, contacts):
+    """Predicate on a sender handle id: the resolved handle, plus any other
+    handle the address book files under the same person (phone + email; an
+    alternate '+' number must share the resolved number's country/prefix).
+    A '+'-prefixed number must match its digits EXACTLY (so a +86 twin with the
+    same local digits never fires a +82 watch, cf. #5); a number typed without
+    a country code falls back to the last-8-digit suffix."""
+    hl = handle.strip().lower()
+    hd = digits(handle)
+    name = contacts.name_for(handle)
+
+    def match(hid):
+        hid = hid or ""
+        if "@" in hl:
+            if hid.lower() == hl:
+                return True
+        elif hd and "@" not in hid:
+            d = digits(hid)
+            if hl.startswith("+"):
+                if d == hd:
+                    return True
+            elif len(hd) >= 7 and d.endswith(hd[-8:]):
+                return True
+        if not name or contacts.name_for(hid) != name:
+            return False
+        # Contacts.name_for keys phones by their last 8 digits, so a +86 handle
+        # sharing a contact number's local digits also "is" that person. When
+        # both sides carry a country code, require the same part before the
+        # last 8 digits (country code + carrier prefix) — a twin never fires.
+        if hl.startswith("+") and "@" not in hl and (hid.startswith("+") and "@" not in hid):
+            return digits(hid)[:-8] == hd[:-8]
+        return True
+    return match
+
+
+def _new_incoming(con, since_rowid, include_filtered=True):
+    filt = "" if include_filtered else "AND (c.is_filtered IS NULL OR c.is_filtered = 0)"
+    return con.execute(
+        f"""SELECT m.ROWID AS rid, m.date AS date, m.text AS text,
+                   m.attributedBody AS ab, m.cache_has_attachments AS has_att,
+                   m.service AS service, h.id AS handle,
+                   MIN(c.chat_identifier) AS chat
+            FROM message m
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            LEFT JOIN chat c ON c.ROWID = cmj.chat_id
+            WHERE m.ROWID > ? AND m.is_from_me = 0 {filt}
+            GROUP BY m.ROWID ORDER BY m.ROWID""", (since_rowid,)).fetchall()
+
+
+def watch_messages(match, since_rowid, timeout, interval, contacts,
+                   include_filtered=True):
+    """Poll fresh chat.db snapshots until an incoming message (ROWID >
+    since_rowid, is_from_me=0) whose sender satisfies `match` shows up.
+    Returns the list of matching message dicts, or None on timeout."""
+    deadline = time.monotonic() + timeout
+    last_sig = None
+    while True:
+        sig = _db_signature()
+        if sig != last_sig:
+            last_sig = sig
+            con, tmp = open_db()
+            try:
+                rows = _new_incoming(con, since_rowid, include_filtered)
+            finally:
+                con.close()
+                shutil.rmtree(tmp, ignore_errors=True)
+            hits = [r for r in rows if match(r["handle"])]
+            if hits:
+                out = []
+                for r in hits:
+                    txt, inline_att = decode_message(r["text"], r["ab"])
+                    h = r["handle"] or ""
+                    out.append({
+                        "rowid": r["rid"],
+                        "date": fmt_dt(cocoa_to_local(r["date"])),
+                        "from": contacts.display(h) or "상대",
+                        "handle": h,
+                        "contact": contacts.name_for(h) or "",
+                        "chat": r["chat"] or "",
+                        "service": r["service"] or "",
+                        "text": txt,
+                        "has_attachment": bool(r["has_att"]) or inline_att,
+                    })
+                return out
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(interval, remaining))
+
+
+def cmd_watch(args, contacts):
+    """Exit codes (mail-skill `watch` convention): 0 = a message arrived,
+    1 = target could not be resolved (or bad option), 2 = timed out."""
+    try:
+        timeout = parse_duration(args.timeout)
+        interval = max(parse_duration(args.interval), 0.01)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return WATCH_UNRESOLVED
+    if args.any == bool(args.identifier):
+        print("대상(identifier)과 --any 중 하나만 지정하세요.", file=sys.stderr)
+        return WATCH_UNRESOLVED
+
+    con, tmp = open_db()
+    try:
+        base = con.execute("SELECT MAX(ROWID) AS mx FROM message").fetchone()["mx"] or 0
+        if args.any:
+            match, label = (lambda _h: True), "모든 대화방"
+        else:
+            tgt = resolve_send_target(con, args.identifier, contacts, None)
+            err = None
+            if tgt is None:
+                err = (f"'{args.identifier}' 대상을 찾지 못했습니다. "
+                       f"`msg threads`로 확인하거나 번호/이메일을 직접 쓰세요.")
+            elif tgt.get("self_unset"):
+                err = ("'내 번호'가 설정돼 있지 않습니다 "
+                       "(~/.config/msg/config 의 self= 또는 MSG_SELF).")
+            elif tgt.get("group"):
+                err = "그룹 대화 감시는 아직 미지원입니다. `msg watch --any`를 쓰세요."
+            elif tgt.get("ambiguous"):
+                err = ("대상이 여러 명입니다. 번호/이메일로 정확히 지정하세요:\n"
+                       + "\n".join(f"  {i}. {contacts.display(h)}  ({h})"
+                                   for i, h in enumerate(tgt["ambiguous"], 1)))
+            if err:
+                print(err, file=sys.stderr)
+                return WATCH_UNRESOLVED
+            match = _watch_matcher(tgt["handle"], contacts)
+            name = tgt.get("name")
+            label = (f"{name} ({tgt['handle']})" if name and name != tgt["handle"]
+                     else tgt["handle"])
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if not args.json:
+        print(f"감시 시작: {label} — 기준 ROWID {base}, "
+              f"시간 제한 {args.timeout}, 간격 {args.interval}", file=sys.stderr)
+    try:
+        hits = watch_messages(match, base, timeout, interval, contacts,
+                              include_filtered=not args.any or args.all)
+    except KeyboardInterrupt:
+        print("중단했습니다.", file=sys.stderr)
+        return 130
+    if hits is None:
+        print(f"시간 초과: {args.timeout} 동안 새 메시지가 없습니다.", file=sys.stderr)
+        return WATCH_TIMEOUT
+    if args.json:
+        print(json.dumps(hits, ensure_ascii=False, indent=2))
+    else:
+        print(f"새 메시지 {len(hits)}건")
+        for o in hits:
+            tag = f" ({o['service']})" if o["service"] and o["service"] != "iMessage" else ""
+            body = o["text"]
+            if o["has_attachment"]:
+                body = ("[첨부] " + body).strip()
+            print(f"[{o['date']}] {o['from']}{tag}: {body}")
+    return WATCH_ARRIVED
+
+
+# --------------------------------------------------------------------------
 # complete (shell autocompletion candidates)
 # --------------------------------------------------------------------------
 def cmd_complete(args, contacts):
@@ -1347,6 +1535,18 @@ def main():
     pd.add_argument("text", nargs="+", help="드래프트 내용")
     pd.add_argument("--force", "-f", action="store_true", help="확인 없이 저장")
 
+    pwa = sub.add_parser(
+        "watch", help="새 수신 메시지가 올 때까지 기다렸다 출력 (도착 0, 해석 실패 1, 시간초과 2)")
+    pwa.add_argument("identifier", nargs="?", help="전화번호/이메일/이름 (--any면 생략)")
+    pwa.add_argument("--any", action="store_true", help="아무 대화방이나 (기본: 필터됨 폴더 제외)")
+    pwa.add_argument("--all", "-a", action="store_true",
+                     help="--any에서 필터됨/알 수 없는 발신자 폴더까지 포함")
+    pwa.add_argument("--timeout", default="4h", help="최대 대기 (기본 4h, 예: 30m, 90s)")
+    pwa.add_argument("--interval", default="15s", help="폴링 간격 (기본 15s)")
+    pwa.add_argument("--from-them-only", action="store_true",
+                     help="상대가 보낸 메시지만 (기본 동작과 같음, 명시용)")
+    pwa.add_argument("--json", action="store_true", help="도착 메시지를 JSON으로만 출력")
+
     pc = sub.add_parser("complete", help="자동완성 후보 출력 (셸 completion용)")
     pc.add_argument("prefix", nargs="?", default="")
 
@@ -1355,6 +1555,8 @@ def main():
     if args.cmd == "complete":
         cmd_complete(args, contacts)
         return
+    if args.cmd == "watch":
+        sys.exit(cmd_watch(args, contacts))
     con, tmp = open_db()
     try:
         if args.cmd == "threads":

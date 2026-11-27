@@ -30,6 +30,8 @@ msg send <identifier> <text…> [--force] [--dry-run] [--sms|--imessage]
 msg reply <identifier> <text…> [...]         # send의 별칭
 msg write <identifier> [--dry-run] [...]     # $EDITOR로 작성해서 보내기
 msg draft <identifier> <text…> [--force]     # Messages 앱 드래프트로 저장(안 보냄)
+msg watch <identifier> [--timeout 4h] [--interval 15s] [--json]  # 상대 답장 오면 출력 후 종료
+msg watch --any [--all] [--timeout …]        # 아무 대화방이나 새 수신 오면 종료
 msg complete [prefix]                        # 자동완성 후보(이름/업체명) 출력 — 셸 completion용
 ```
 
@@ -95,6 +97,14 @@ msg reply <상대> <보낼 내용…>     # send의 별칭
   해석해 보여준다. JSON엔 `attachments: [{path,name,mime,uti,bytes,exists}]`. `exists=false`면
   아직 다운로드 안 된 것. `--media`로 첨부 있는 메시지만, `--open`으로 파일을 macOS `open`으로 연다.
 - 시각은 localtime, `YYYY-MM-DD HH:MM`.
+
+## 답장 기다리기 (`msg watch`)
+- 상대 회신을 기다려야 하면 chat.db를 직접 폴링하는 스크립트를 만들지 말고 **`msg watch <상대>`를 백그라운드로** 띄운다. 끝나면 결과가 찍혀 있다.
+- 종료 코드(mail-skill `watch`와 같음): **0 도착**(발신자·시각·본문 출력) · **1 대상 해석 실패**(없음·여러 명·그룹 — 번호/이메일로 다시 지정) · **2 시간 초과**.
+- 시작 시점 이후 **상대가 보낸**(`is_from_me=0`) 메시지만 센다. 기존 안 읽은 메시지·내가 보낸 메시지는 무시.
+- 대상 해석은 `send`와 같다. 여러 명이면 묻지 않고 exit 1. 국가코드 붙은 번호(`+82…`)는 숫자 완전 일치만 인정.
+- `--any`는 스팸 폴더(필터됨) 제외가 기본, `--all`로 포함. 기계 파싱은 `--json`(`[{rowid,date,from,handle,contact,chat,service,text,has_attachment}]`).
+- 읽기 전용이라 확인 없이 써도 된다. 그룹 대화방 지정 감시는 미지원(`--any`로 대체).
 
 ## 주의 / 함정
 - 본문 대부분은 `attributedBody`(NSAttributedString 바이너리)에서 디코딩된다. CLI가

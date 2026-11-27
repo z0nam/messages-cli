@@ -38,6 +38,8 @@ msg send <identifier> <text…>               # 보내기 (미리보기+확인; 
 msg reply <identifier> <text…>              # send의 별칭
 msg write <identifier>                       # $EDITOR로 작성해서 보내기
 msg draft <identifier> <text…>              # Messages 앱 드래프트로 저장 (안 보냄)
+msg watch <identifier> [--timeout 4h] [--interval 15s] [--json]  # 상대 답장이 오면 출력하고 종료
+msg watch --any [--all] [--timeout …]       # 아무 대화방이나 새 수신이 오면 종료
 msg complete [prefix]                        # 자동완성 후보 출력 (셸 completion용)
 ```
 `<identifier>`: **연락처 이름**·전화번호(끝 8자리 느슨 매칭, `010…`/`+8210…` 무관)·이메일·
@@ -125,6 +127,19 @@ Security > Automation > 터미널 → Messages).
   `plistlib`로 순수 파이썬 생성(pyobjc 불필요). 기존 드래프트는 `.msgbak`으로 백업 후 덮어쓰고,
   쓴 뒤 round-trip 검증. 앱이 캐시해서 재시작 전엔 안 보일 수 있음.
 
+## 답장 기다리기 (`watch`)
+에이전트가 상대 회신을 기다릴 때 쓰는 **읽기 전용** 감시 명령(mail-skill `mailskill watch`와 같은 종료 코드 규약).
+- 시작 시점 chat.db의 최대 ROWID를 기준으로, 그 뒤에 **상대가 보낸(`is_from_me=0`)** 메시지가 생기면 발신자·시각·본문을 찍고 끝난다. 기존 안 읽은 메시지는 "새 메시지"로 치지 않는다.
+- 종료 코드: **0 도착 · 1 대상 해석 실패(없음·여러 명·그룹·옵션 오류) · 2 시간 초과** · 130 Ctrl-C.
+- 대상 해석은 `send`와 같은 로직(`resolve_send_target`). 여러 명이면 대화형 선택 없이 exit 1 — 번호/이메일로 정확히 지정.
+- 매칭: 해석된 handle + 연락처상 같은 사람의 다른 handle(번호·이메일). `+82…`처럼 국가코드가 붙은 번호는 **숫자 완전 일치**만 인정(끝자리가 같은 `+86…` 혼동 방지, #5).
+- `--any`는 필터됨/알 수 없는 발신자 폴더(스팸)를 기본 제외, `--all`로 포함. `--from-them-only`는 기본 동작과 같아 명시용.
+- chat.db가 바뀌었을 때(`chat.db`/`-wal`의 mtime·크기)만 temp 복사를 다시 떠서 읽는다. 에이전트에서는 백그라운드로 띄우고 종료를 기다리면 된다.
+```
+msg watch 홍길동 --timeout 2h          # 도착하면 exit 0
+msg watch +821012345678 --json --interval 30s
+```
+
 ## 테스트
 stdlib `unittest`만 사용(의존성 0). **합성 chat.db 픽스처**(temp/메모리)라 실제 메시지 데이터는 안 건드림.
 ```
@@ -132,7 +147,7 @@ python3 tests/test_msg.py            # 또는: python3 -m unittest discover -s t
 ```
 43개 테스트: attributedBody 디코더(한글/이모지/길이 0x81/마커없음), 날짜(ns·초 epoch·end-of-day),
 이름 조합(CJK 성+이름/라틴/닉/조직), unread 뱃지(is_read·last_read·is_filtered·`--all`), 검색(blob/필터),
-첨부 경로 해석, 전송 대상 해석(동일인 collapse·신규·--sms).
+첨부 경로 해석, 전송 대상 해석(동일인 collapse·신규·--sms), watch(도착·시간초과·해석실패·스팸 폴더·+86 혼동).
 
 ## 검증 메모
 - `attributedBody` 디코더: 알고 있는 최근 메시지로 정답 대조(한글/이모지/멀티라인 포함).
@@ -162,5 +177,5 @@ TLS 터널(`msg.namun.net`)로 노출.
 - 세팅·시크릿·터널·커넥터 등록·위협 모델은 **`SETUP-REMOTE.md`**. 시크릿은 repo 밖(`~/.config/msg/http.env`).
 
 ## 범위 밖 (다음)
-그룹/첨부 전송, `msg watch`(실시간 tail), `msg export`, 패키징·CI.
+그룹/첨부 전송, 그룹 대화방 watch·MCP `messages_watch`, `msg export`, 패키징·CI.
 (읽기·연락처·검색·첨부 경로·탭완성·iMessage/SMS 1:1 보내기·write·draft·테스트는 구현됨. 계획은 `ROADMAP.md`.)
