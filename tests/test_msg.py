@@ -428,6 +428,17 @@ class TestResolveSendTarget(DBTest):
         tgt = MSG.resolve_send_target(self.con, "+861011112222", self.c, None)
         self.assertEqual(tgt["handle"], "+861011112222")
 
+    def test_plus_email_not_treated_as_e164(self):
+        # an email like +8210...@x must not collapse onto the phone handle
+        self.c.by.pop("+821011112222", None)
+        self.con.execute("INSERT INTO handle (ROWID, id) VALUES (6, '+821011112222@example.com')")
+        self.con.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name, service_name, "
+            "guid) VALUES (60, '+821011112222@example.com', NULL, 'iMessage', 'g60')")
+        self.con.execute("INSERT INTO chat_handle_join VALUES (60, 6)")
+        tgt = MSG.resolve_send_target(self.con, "+821011112222@example.com", self.c, None)
+        self.assertNotEqual(tgt.get("handle"), "+821011112222")
+
     def test_local_number_still_ambiguous_with_suffix_twin(self):
         self._add_plus86_twin()
         tgt = MSG.resolve_send_target(self.con, "01011112222", self.c, None)

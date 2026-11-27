@@ -948,7 +948,7 @@ def resolve_send_target(con, identifier, contacts, force_service):
     # exactly the typed number, the user has already disambiguated — keep only
     # those. Loose suffix ambiguity is left for inputs without a country code.
     q = identifier.strip()
-    if q.startswith("+") and len(digits(q)) >= 7:
+    if q.startswith("+") and "@" not in q and len(digits(q)) >= 7:
         exact = [c for c in cands
                  if "@" not in c[0] and digits(c[0]) == digits(q)]
         if exact:
