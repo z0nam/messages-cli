@@ -698,6 +698,19 @@ class TestWatchHelpers(unittest.TestCase):
         self.assertFalse(m("+861011112222"))
         self.assertFalse(m("+821011112222@example.com"))
 
+    def test_matcher_contact_fallback_keeps_country_code(self):
+        # real Contacts.name_for resolves phones by last 8 digits — the +86 twin
+        # of either of the person's numbers must not pass via the name fallback
+        class Suffix8(FakeContacts):
+            def name_for(self, handle):
+                d = MSG.digits(handle or "")
+                return {"11112222": "홍길동", "55556666": "홍길동"}.get(d[-8:])
+        m = MSG._watch_matcher("+821011112222", Suffix8())
+        self.assertTrue(m("+821011112222"))
+        self.assertTrue(m("+821055556666"))   # same person, other number
+        self.assertFalse(m("+861011112222"))
+        self.assertFalse(m("+861055556666"))
+
     def test_matcher_local_number_uses_suffix(self):
         m = MSG._watch_matcher("010-1111-2222", FakeContacts())
         self.assertTrue(m("+821011112222"))

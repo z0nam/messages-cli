@@ -1293,7 +1293,8 @@ def _db_signature():
 
 def _watch_matcher(handle, contacts):
     """Predicate on a sender handle id: the resolved handle, plus any other
-    handle the address book files under the same person (phone + email).
+    handle the address book files under the same person (phone + email; an
+    alternate '+' number must share the resolved number's country/prefix).
     A '+'-prefixed number must match its digits EXACTLY (so a +86 twin with the
     same local digits never fires a +82 watch, cf. #5); a number typed without
     a country code falls back to the last-8-digit suffix."""
@@ -1313,7 +1314,15 @@ def _watch_matcher(handle, contacts):
                     return True
             elif len(hd) >= 7 and d.endswith(hd[-8:]):
                 return True
-        return bool(name) and contacts.name_for(hid) == name
+        if not name or contacts.name_for(hid) != name:
+            return False
+        # Contacts.name_for keys phones by their last 8 digits, so a +86 handle
+        # sharing a contact number's local digits also "is" that person. When
+        # both sides carry a country code, require the same part before the
+        # last 8 digits (country code + carrier prefix) — a twin never fires.
+        if hl.startswith("+") and "@" not in hl and (hid.startswith("+") and "@" not in hid):
+            return digits(hid)[:-8] == hd[:-8]
+        return True
     return match
 
 
