@@ -57,10 +57,11 @@ def log(*a):
 # Pending-send store (approval gate)
 # --------------------------------------------------------------------------
 class Pending:
-    def __init__(self, identifier, text, service):
+    def __init__(self, identifier, text, service, allow_intl=False):
         self.identifier = identifier
         self.text = text
         self.service = service
+        self.allow_intl = allow_intl
         self.created = None  # set by caller (no time-at-import concerns)
         self.event = threading.Event()
         self.result = None       # filled on approve/deny
@@ -107,13 +108,13 @@ def _push_approval(pid, preview_text):
         return False, f"푸시 실패: {e}"
 
 
-def _remote_send(identifier, text, service):
+def _remote_send(identifier, text, service, allow_intl=False):
     """The gated send: preview (resolve) → push → wait for phone approval → send."""
     if not SEND_ENABLED:
         return core.text_result(
             "원격 전송이 비활성화돼 있습니다 (MSG_SEND_ENABLED=1 필요). "
             "읽기만 가능합니다.", is_error=True)
-    svc = core._service_flag({"service": service})
+    svc = core._send_flags({"service": service, "allow_international": allow_intl})
     # 1) resolve + preview via the CLI (reuses all target-resolution safety)
     ok, out, err = core.run_msg(["send", identifier, text, *svc, "--dry-run"])
     if not ok:
@@ -121,7 +122,7 @@ def _remote_send(identifier, text, service):
     preview = out.strip()
     # 2) register pending + push
     pid = _new_pid()
-    pend = Pending(identifier, text, service)
+    pend = Pending(identifier, text, service, allow_intl)
     pend.created = time.monotonic()
     with PENDING_LOCK:
         PENDING[pid] = pend
@@ -156,7 +157,8 @@ def _remote_send(identifier, text, service):
 
 def _execute_approved(pend):
     """Called from the /approve handler thread: actually send now."""
-    svc = core._service_flag({"service": pend.service})
+    svc = core._send_flags({"service": pend.service,
+                            "allow_international": pend.allow_intl})
     final = "--dry-run" if SEND_DRYRUN else "--force"
     ok, out, err = core.run_msg(
         ["send", pend.identifier, pend.text, *svc, final], timeout=90)
@@ -187,7 +189,8 @@ def dispatch_mcp(msg):
             if name == "messages_send" and args.get("confirm") is True:
                 result = _remote_send(
                     args.get("identifier", ""), args.get("text", ""),
-                    args.get("service", "auto"))
+                    args.get("service", "auto"),
+                    args.get("allow_international") is True)
             else:
                 result = core.handle_request(method, params, req_id)
         else:
