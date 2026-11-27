@@ -216,8 +216,8 @@ TOOLS = [
             "확신이 없으면 항상 먼저 confirm=false로 미리보기를 사용자에게 보여주고 확정받아라. "
             "service는 auto(기본)·imessage·sms. "
             "+82가 아닌 국외 번호(예: +86 중국)는 기본 차단 — 사용자가 그 국외 번호로 보내라고 "
-            "명시했을 때만 allow_international=true. +82로 지정했는데 끝자리만 같은 다른 국가 번호 "
-            "대화만 있으면 그쪽으로 보내지 않고 실패한다(allow_international로도 바뀌지 않음)."
+            "명시했을 때만 allow_international=true. +82/010으로 지정했는데 끝자리만 같은 국외 번호 "
+            "대화만 있으면 그쪽이 아니라 입력한 +82 번호로 새 대화를 만든다(미리보기에 표시)."
         ),
         "inputSchema": {
             "type": "object",

@@ -615,7 +615,8 @@ class TestWatch(unittest.TestCase):
         self.assertEqual(hits[0]["from"], "홍길동")
         self.assertEqual(hits[0]["handle"], "+821011112222")
 
-    def test_plus82_with_only_foreign_twin_is_unresolved(self):
+    def test_plus82_with_only_foreign_twin_watches_new_handle(self):
+        # resolves to the typed +82 handle; a reply on the +86 twin is ignored
         con = sqlite3.connect(self.db)
         con.execute("INSERT INTO handle (ROWID, id) VALUES (7, '+861077778888')")
         con.execute("INSERT INTO chat (ROWID, chat_identifier, service_name, guid) "
@@ -623,9 +624,9 @@ class TestWatch(unittest.TestCase):
         con.execute("INSERT INTO chat_handle_join VALUES (70, 7)")
         con.commit()
         con.close()
-        code, _ = self.run_watch(identifier="+821077778888", timeout="0.05s")
-        self.assertEqual(code, MSG.WATCH_UNRESOLVED)
-
+        code, _ = self.run_watch([lambda: self.add(70, 7, "쌍둥이 답장")],
+                                 identifier="+821077778888", timeout="0.05s")
+        self.assertEqual(code, MSG.WATCH_TIMEOUT)
     def test_existing_messages_are_not_new(self):
         # rows already in the DB (incl. unread ones) predate the baseline
         code, _ = self.run_watch(identifier="+821011112222", timeout="0.05s",
@@ -796,25 +797,32 @@ class TestIntlGuard(DBTest):
         tgt, _ = self._resolve("01033334444", False)   # new domestic target
         self.assertNotIn("intl", tgt)
 
-    def test_local_input_resolving_to_foreign_thread_is_blocked(self):
+    def test_local_input_with_only_foreign_twin_becomes_new_plus82(self):
         self._add_plus86_only()
-        res, err = self._resolve("01077778888", False)
-        self.assertIsInstance(res, SystemExit)
-        self.assertIn("+861077778888", err)
-
-    def test_plus82_with_only_foreign_twin_fails_even_if_allowed(self):
+        tgt, _ = self._resolve("01077778888", False)
+        self.assertEqual(tgt["handle"], "+821077778888")
+        self.assertTrue(tgt["new"])
+        self.assertNotIn("intl", tgt)
+        self.assertEqual(tgt["ignored_twins"], ["+861077778888"])
+        out = capture_text(MSG._preview_target, tgt, "hi")
+        self.assertIn("새 대화", out)
+        self.assertIn("+861077778888 대화는 무시함", out)
+    def test_plus82_with_only_foreign_twin_becomes_new_conversation(self):
         self._add_plus86_only()
         for allow in (False, True):
-            res, err = self._resolve("+821077778888", allow)
-            self.assertIsInstance(res, SystemExit, allow)
-            self.assertNotEqual(res.code, 0)
-            self.assertIn("정확히 일치하는 대화가 없습니다", err)
-
-    def test_twin_only_from_resolve_send_target(self):
+            tgt, _ = self._resolve("+821077778888", allow)
+            self.assertEqual(tgt["handle"], "+821077778888", allow)
+            self.assertTrue(tgt["new"])
+            self.assertEqual(tgt["ignored_twins"], ["+861077778888"])
+    def test_explicit_foreign_input_still_hits_its_own_thread(self):
+        # typing the +86 number itself resolves to that thread → guard applies
         self._add_plus86_only()
-        tgt = MSG.resolve_send_target(self.con, "+821077778888", self.c, None)
-        self.assertEqual(tgt, {"twin_only": ["+861077778888"]})
-
+        res, err = self._resolve("+861077778888", False)
+        self.assertIsInstance(res, SystemExit)
+        self.assertIn("+86 중국", err)
+        tgt, _ = self._resolve("+861077778888", True)
+        self.assertEqual(tgt["handle"], "+861077778888")
+        self.assertFalse(tgt["new"])
     def test_exact_domestic_handle_still_counts_as_exact(self):
         # a handle stored in domestic form (010…) equals +8210… input
         self.con.execute("INSERT INTO handle (ROWID, id) VALUES (8, '01022223333')")

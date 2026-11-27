@@ -932,6 +932,22 @@ def send_via_messages(handle, text, service_type):
     return False, f"전송 실패: {err}"
 
 
+def _is_domestic_phone(q):
+    """A Korean number typed without a country code (010…, 02-…)."""
+    q = (q or "").strip()
+    d = digits(q)
+    return ("@" not in q and not q.startswith("+") and d.startswith("0")
+            and not d.startswith("00") and len(d) >= 9)
+
+
+def _new_target(handle, contacts, force_service, ignored_twins=None):
+    tgt = {"handle": handle, "name": contacts.display(handle),
+           "service": force_service or "iMessage", "new": True}
+    if ignored_twins:
+        tgt["ignored_twins"] = ignored_twins
+    return tgt
+
+
 def resolve_send_target(con, identifier, contacts, force_service):
     """Figure out (handle, name, service) to send to. Returns a dict:
       {handle, name, service, new}                  — ready to send
@@ -994,10 +1010,10 @@ def resolve_send_target(con, identifier, contacts, force_service):
     # exactly the typed number, the user has already disambiguated — keep only
     # those. Loose suffix ambiguity is left for inputs without a country code.
     #
-    # And when nothing matches exactly, do NOT fall back to a same-suffix
+    # And when nothing matches exactly, NEVER fall back to a same-suffix
     # handle under another country code (issue: iPhone "reply as text" stored
-    # 010… numbers as +86…). Stop instead — a twin is never a valid guess for
-    # an explicitly typed country code.
+    # 010… numbers as +86…). Start a new conversation with the typed number
+    # instead; the twins are reported so the preview can say they were ignored.
     q = identifier.strip()
     if q.startswith("+") and "@" not in q and len(digits(q)) >= 7:
         exact = [c for c in cands
@@ -1007,7 +1023,14 @@ def resolve_send_target(con, identifier, contacts, force_service):
         else:
             twins = [c[0] for c in cands if "@" not in c[0]]
             if twins:
-                return {"twin_only": twins}
+                return _new_target(q, contacts, force_service, twins)
+    # Domestic input (010…) whose only matches are foreign twins (+86…): it
+    # means the Korean number, so normalize to +82 and start a new conversation
+    # rather than resolving to the foreign thread.
+    elif _is_domestic_phone(q) and all(
+            "@" not in c[0] and intl_country(c[0]) for c in cands):
+        return _new_target("+" + _canon_phone(q), contacts, force_service,
+                           [c[0] for c in cands])
 
     identities = []
     for _h, _s, _d, idy in cands:
@@ -1123,11 +1146,6 @@ def _resolve_or_die(con, contacts, identifier, force_service, interactive=True,
 
 def _resolve_target(con, contacts, identifier, force_service, interactive):
     tgt = resolve_send_target(con, identifier, contacts, force_service)
-    if tgt and tgt.get("twin_only"):
-        twins = ", ".join(tgt["twin_only"])
-        _die(f"'{identifier}' 와 정확히 일치하는 대화가 없습니다. "
-             f"끝자리만 같은 다른 번호({twins})로는 보내지 않습니다.\n"
-             f"  번호를 다시 확인하세요. (--allow-intl 로도 이 대상을 바꾸지 않습니다.)")
     if tgt is None:
         _die(f"'{identifier}' 대상을 찾지 못했습니다. "
              f"`msg threads`로 확인하거나 번호/이메일을 직접 쓰세요.")
@@ -1152,8 +1170,7 @@ def _resolve_target(con, contacts, identifier, force_service, interactive):
             print("취소했습니다.")
             sys.exit(0)
         tgt = resolve_send_target(con, reps[int(pick) - 1], contacts, force_service)
-        if (not tgt or tgt.get("ambiguous") or tgt.get("group")
-                or tgt.get("twin_only")):
+        if not tgt or tgt.get("ambiguous") or tgt.get("group"):
             _die("선택한 대상을 확정하지 못했습니다.")
     return tgt
 
@@ -1165,6 +1182,8 @@ def _preview_target(tgt, text, kind="전송"):
     print(f"  받는 사람 : {label}" + (f"   ({handle})" if label != handle else ""))
     print(f"  서비스    : {stype}"
           + ("    ⚠️ 새 대화(기존 스레드 없음)" if tgt.get("new") else ""))
+    if tgt.get("ignored_twins"):
+        print(f"  ⚠️ 끝자리가 같은 {', '.join(tgt['ignored_twins'])} 대화는 무시함")
     if tgt.get("intl"):
         cc, cname = tgt["intl"]
         print(f"  ⚠️ 국외 번호(+{cc} {cname}) — --allow-intl 로 허용됨")
@@ -1498,10 +1517,6 @@ def cmd_watch(args, contacts):
                        "(~/.config/msg/config 의 self= 또는 MSG_SELF).")
             elif tgt.get("group"):
                 err = "그룹 대화 감시는 아직 미지원입니다. `msg watch --any`를 쓰세요."
-            elif tgt.get("twin_only"):
-                err = (f"'{args.identifier}' 와 정확히 일치하는 대화가 없습니다 "
-                       f"(끝자리만 같은 다른 번호: {', '.join(tgt['twin_only'])}). "
-                       f"번호를 다시 확인하세요.")
             elif tgt.get("ambiguous"):
                 err = ("대상이 여러 명입니다. 번호/이메일로 정확히 지정하세요:\n"
                        + "\n".join(f"  {i}. {contacts.display(h)}  ({h})"
